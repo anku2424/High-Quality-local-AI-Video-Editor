@@ -32,6 +32,70 @@
         <p>video uploaded</p>
       </section>
       {% endif %}
+
+      <section
+        id="transcription-processing"
+        class="status"
+        {% if transcription_status != "processing" %}style="display: none"{% endif %}
+      >
+        <div class="processing-row">
+          <span class="roller" aria-hidden="true"></span>
+          <p>generating transcription</p>
+        </div>
+      </section>
+
+      <section
+        id="transcription-result"
+        class="status"
+        {% if transcription_status != "completed" and transcription_status != "failed" %}style="display: none"{% endif %}
+      >
+        {% if transcription_status == "failed" %}
+        <p>{{ transcription_error }}</p>
+        {% else %}
+        <p>transcription</p>
+        <pre id="transcription-text" class="transcription-text">{{ transcription_text }}</pre>
+        {% endif %}
+      </section>
     </main>
+
+    <script>
+      (function () {
+        const processingEl = document.getElementById("transcription-processing");
+        const resultEl = document.getElementById("transcription-result");
+        const textEl = document.getElementById("transcription-text");
+
+        const isProcessingVisible = processingEl.style.display !== "none";
+        if (!isProcessingVisible) return;
+
+        let pollTimer = null;
+
+        async function pollStatus() {
+          try {
+            const response = await fetch("/transcription-status", { cache: "no-store" });
+            if (!response.ok) return;
+            const data = await response.json();
+
+            if (data.status === "completed") {
+              processingEl.style.display = "none";
+              resultEl.style.display = "block";
+              if (textEl) {
+                textEl.textContent = data.text || "";
+              }
+              if (pollTimer) clearInterval(pollTimer);
+            } else if (data.status === "failed") {
+              processingEl.style.display = "none";
+              resultEl.style.display = "block";
+              resultEl.innerHTML = "<p>Transcription failed.</p>";
+              if (pollTimer) clearInterval(pollTimer);
+            }
+          } catch (_) {
+            // Keep polling until the background job finishes.
+          }
+        }
+
+        pollTimer = setInterval(pollStatus, 2000);
+        pollStatus();
+      })();
+    </script>
   </body>
 </html>
