@@ -57,7 +57,7 @@
         class="status"
         {% if transcription_status != "completed" %}style="display: none"{% endif %}
       >
-        <p>transcription</p>
+        <p class="section-title">transcription</p>
         <pre id="transcription-text" class="transcription-text">{{ transcription_text }}</pre>
       </section>
 
@@ -66,7 +66,7 @@
         class="card"
         {% if transcription_status != "completed" %}style="display: none"{% endif %}
       >
-        <p class="result-label">subtitle style</p>
+        <p class="result-label section-title">subtitle style</p>
         <form action="/burn-subtitles" method="post" class="subtitle-control-form">
           <label for="font_size">
             Font Size:
@@ -181,7 +181,7 @@
         {% if subtitle_status == "failed" %}
         <p id="subtitle-result-text">{{ subtitle_error }}</p>
         {% else %}
-        <p id="subtitle-result-text">subtitles burned</p>
+        <p id="subtitle-result-text" class="section-title">subtitles burned</p>
         {% if karaoke_video_path %}
         <video id="subtitle-video" class="preview-video" controls preload="metadata">
           <source src="/{{ karaoke_video_path }}" type="video/mp4" />
