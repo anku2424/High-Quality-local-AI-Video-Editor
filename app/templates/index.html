@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Local OpenAI Key Demo</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>OpenAI API Key</h1>
+      <p class="subtitle">Enter your API key for local testing.</p>
+
+      <form action="/save-key" method="post" class="card">
+        <label for="api_key">API Key</label>
+        <input
+          id="api_key"
+          name="api_key"
+          type="password"
+          placeholder="sk-..."
+          required
+        />
+        <button type="submit">Save Key</button>
+      </form>
+    </main>
+  </body>
+</html>

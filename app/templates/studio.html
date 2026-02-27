@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Video Upload Studio</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>Video Upload Studio</h1>
+      <p class="subtitle">Your API key is saved. Upload a video to continue.</p>
+
+      <section class="status success">
+        <p>Saved API key:</p>
+        <code class="key-display">{{ masked_key }}</code>
+        <form action="/clear-key" method="post">
+          <button type="submit" class="secondary">Clear Key</button>
+        </form>
+      </section>
+
+      <form action="/upload-video" method="post" enctype="multipart/form-data" class="card">
+        <label for="video">Upload Video</label>
+        <input id="video" name="video" type="file" accept="video/*" required />
+        <button type="submit">Upload Video</button>
+      </form>
+
+      {% if video_uploaded %}
+      <section class="status success">
+        <p>video uploaded</p>
+      </section>
+      {% endif %}
+    </main>
+  </body>
+</html>
