@@ -85,7 +85,10 @@
             } else if (data.status === "failed") {
               processingEl.style.display = "none";
               resultEl.style.display = "block";
-              resultEl.innerHTML = "<p>Transcription failed.</p>";
+              resultEl.innerHTML = "";
+              const errorNode = document.createElement("p");
+              errorNode.textContent = data.error || "Transcription failed.";
+              resultEl.appendChild(errorNode);
               if (pollTimer) clearInterval(pollTimer);
             }
           } catch (_) {
