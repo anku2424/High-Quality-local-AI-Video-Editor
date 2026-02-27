@@ -25,7 +25,7 @@ body {
 }
 
 .container {
-  width: min(560px, 100%);
+  width: min(920px, 100%);
 }
 
 h1 {
@@ -103,4 +103,22 @@ button:hover {
   overflow-wrap: anywhere;
   word-break: break-word;
   white-space: pre-wrap;
+}
+
+.studio-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) 1fr;
+  gap: 14px;
+  align-items: start;
+}
+
+.studio-layout .status,
+.studio-layout .card {
+  margin-bottom: 0;
+}
+
+@media (max-width: 760px) {
+  .studio-layout {
+    grid-template-columns: 1fr;
+  }
 }
