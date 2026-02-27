@@ -143,6 +143,18 @@ button:hover {
   line-height: 1.45;
 }
 
+.result-label {
+  margin: 14px 0 10px;
+  font-weight: 600;
+}
+
+.preview-video {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #000;
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);

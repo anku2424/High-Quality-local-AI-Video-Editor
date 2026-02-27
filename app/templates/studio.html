@@ -54,6 +54,12 @@
         {% else %}
         <p>transcription</p>
         <pre id="transcription-text" class="transcription-text">{{ transcription_text }}</pre>
+        {% if karaoke_video_path %}
+        <p class="result-label">karaoke video</p>
+        <video class="preview-video" controls preload="metadata">
+          <source src="/{{ karaoke_video_path }}" type="video/mp4" />
+        </video>
+        {% endif %}
         {% endif %}
       </section>
     </main>
@@ -80,6 +86,24 @@
               resultEl.style.display = "block";
               if (textEl) {
                 textEl.textContent = data.text || "";
+              }
+              if (data.karaoke_video_path && !resultEl.querySelector("video")) {
+                const labelNode = document.createElement("p");
+                labelNode.className = "result-label";
+                labelNode.textContent = "karaoke video";
+
+                const videoNode = document.createElement("video");
+                videoNode.className = "preview-video";
+                videoNode.controls = true;
+                videoNode.preload = "metadata";
+
+                const sourceNode = document.createElement("source");
+                sourceNode.src = "/" + data.karaoke_video_path;
+                sourceNode.type = "video/mp4";
+
+                videoNode.appendChild(sourceNode);
+                resultEl.appendChild(labelNode);
+                resultEl.appendChild(videoNode);
               }
               if (pollTimer) clearInterval(pollTimer);
             } else if (data.status === "failed") {
