@@ -45,18 +45,145 @@
       </section>
 
       <section
+        id="transcription-error"
+        class="status"
+        {% if transcription_status != "failed" %}style="display: none"{% endif %}
+      >
+        <p id="transcription-error-text">{{ transcription_error }}</p>
+      </section>
+
+      <section
         id="transcription-result"
         class="status"
-        {% if transcription_status != "completed" and transcription_status != "failed" %}style="display: none"{% endif %}
+        {% if transcription_status != "completed" %}style="display: none"{% endif %}
       >
-        {% if transcription_status == "failed" %}
-        <p>{{ transcription_error }}</p>
-        {% else %}
         <p>transcription</p>
         <pre id="transcription-text" class="transcription-text">{{ transcription_text }}</pre>
+      </section>
+
+      <section
+        id="subtitle-controls"
+        class="card"
+        {% if transcription_status != "completed" %}style="display: none"{% endif %}
+      >
+        <p class="result-label">subtitle style</p>
+        <form action="/burn-subtitles" method="post" class="subtitle-control-form">
+          <label for="font_size">
+            Font Size:
+            <span id="font_size_value">{{ selected_font_size }}</span>px
+          </label>
+          <input
+            id="font_size"
+            name="font_size"
+            type="range"
+            min="24"
+            max="200"
+            step="1"
+            value="{{ selected_font_size }}"
+          />
+
+          <label for="border_size">
+            Border Size:
+            <span id="border_size_value">{{ selected_border_size }}</span>px
+          </label>
+          <input
+            id="border_size"
+            name="border_size"
+            type="range"
+            min="0"
+            max="20"
+            step="1"
+            value="{{ selected_border_size }}"
+          />
+
+          <label>Highlight Colour</label>
+          <div class="swatch-grid">
+            {% for swatch in color_swatches %}
+            <input
+              id="highlight_{{ loop.index }}"
+              class="swatch-input"
+              type="radio"
+              name="highlight_color"
+              value="{{ swatch }}"
+              {% if swatch == selected_highlight_color %}checked{% endif %}
+            />
+            <label
+              class="swatch-box"
+              for="highlight_{{ loop.index }}"
+              style="--swatch-color: {{ swatch }}"
+              title="{{ swatch }}"
+            ></label>
+            {% endfor %}
+          </div>
+
+          <label>Non-highlight Colour</label>
+          <div class="swatch-grid">
+            {% for swatch in color_swatches %}
+            <input
+              id="non_highlight_{{ loop.index }}"
+              class="swatch-input"
+              type="radio"
+              name="non_highlight_color"
+              value="{{ swatch }}"
+              {% if swatch == selected_non_highlight_color %}checked{% endif %}
+            />
+            <label
+              class="swatch-box"
+              for="non_highlight_{{ loop.index }}"
+              style="--swatch-color: {{ swatch }}"
+              title="{{ swatch }}"
+            ></label>
+            {% endfor %}
+          </div>
+
+          <label>Border Colour</label>
+          <div class="swatch-grid">
+            {% for swatch in color_swatches %}
+            <input
+              id="border_{{ loop.index }}"
+              class="swatch-input"
+              type="radio"
+              name="border_color"
+              value="{{ swatch }}"
+              {% if swatch == selected_border_color %}checked{% endif %}
+            />
+            <label
+              class="swatch-box"
+              for="border_{{ loop.index }}"
+              style="--swatch-color: {{ swatch }}"
+              title="{{ swatch }}"
+            ></label>
+            {% endfor %}
+          </div>
+
+          <button id="burn-button" type="submit" {% if subtitle_status == "processing" %}disabled{% endif %}>
+            Burn Subtitles
+          </button>
+        </form>
+      </section>
+
+      <section
+        id="subtitle-processing"
+        class="status"
+        {% if subtitle_status != "processing" %}style="display: none"{% endif %}
+      >
+        <div class="processing-row">
+          <span class="roller" aria-hidden="true"></span>
+          <p>burning subtitles</p>
+        </div>
+      </section>
+
+      <section
+        id="subtitle-result"
+        class="status"
+        {% if subtitle_status != "completed" and subtitle_status != "failed" %}style="display: none"{% endif %}
+      >
+        {% if subtitle_status == "failed" %}
+        <p id="subtitle-result-text">{{ subtitle_error }}</p>
+        {% else %}
+        <p id="subtitle-result-text">subtitles burned</p>
         {% if karaoke_video_path %}
-        <p class="result-label">karaoke video</p>
-        <video class="preview-video" controls preload="metadata">
+        <video id="subtitle-video" class="preview-video" controls preload="metadata">
           <source src="/{{ karaoke_video_path }}" type="video/mp4" />
         </video>
         {% endif %}
@@ -66,12 +193,117 @@
 
     <script>
       (function () {
-        const processingEl = document.getElementById("transcription-processing");
-        const resultEl = document.getElementById("transcription-result");
-        const textEl = document.getElementById("transcription-text");
+        const transcriptionProcessingEl = document.getElementById("transcription-processing");
+        const transcriptionResultEl = document.getElementById("transcription-result");
+        const transcriptionErrorEl = document.getElementById("transcription-error");
+        const transcriptionTextEl = document.getElementById("transcription-text");
+        const transcriptionErrorTextEl = document.getElementById("transcription-error-text");
 
-        const isProcessingVisible = processingEl.style.display !== "none";
-        if (!isProcessingVisible) return;
+        const subtitleControlsEl = document.getElementById("subtitle-controls");
+        const subtitleProcessingEl = document.getElementById("subtitle-processing");
+        const subtitleResultEl = document.getElementById("subtitle-result");
+        const subtitleResultTextEl = document.getElementById("subtitle-result-text");
+        const burnButtonEl = document.getElementById("burn-button");
+        const fontSizeSliderEl = document.getElementById("font_size");
+        const fontSizeValueEl = document.getElementById("font_size_value");
+        const borderSizeSliderEl = document.getElementById("border_size");
+        const borderSizeValueEl = document.getElementById("border_size_value");
+
+        if (fontSizeSliderEl && fontSizeValueEl) {
+          fontSizeSliderEl.addEventListener("input", function () {
+            fontSizeValueEl.textContent = fontSizeSliderEl.value;
+          });
+        }
+
+        if (borderSizeSliderEl && borderSizeValueEl) {
+          borderSizeSliderEl.addEventListener("input", function () {
+            borderSizeValueEl.textContent = borderSizeSliderEl.value;
+          });
+        }
+
+        function renderSubtitleVideo(path) {
+          let videoEl = document.getElementById("subtitle-video");
+          if (!path) return;
+
+          if (!videoEl) {
+            videoEl = document.createElement("video");
+            videoEl.id = "subtitle-video";
+            videoEl.className = "preview-video";
+            videoEl.controls = true;
+            videoEl.preload = "metadata";
+            subtitleResultEl.appendChild(videoEl);
+          }
+
+          videoEl.innerHTML = "";
+          const sourceNode = document.createElement("source");
+          sourceNode.src = "/" + path;
+          sourceNode.type = "video/mp4";
+          videoEl.appendChild(sourceNode);
+          videoEl.load();
+        }
+
+        function clearSubtitleVideo() {
+          const videoEl = document.getElementById("subtitle-video");
+          if (videoEl) {
+            videoEl.remove();
+          }
+        }
+
+        function applyState(data) {
+          if (data.status === "processing") {
+            transcriptionProcessingEl.style.display = "block";
+            transcriptionResultEl.style.display = "none";
+            transcriptionErrorEl.style.display = "none";
+            subtitleControlsEl.style.display = "none";
+          } else if (data.status === "completed") {
+            transcriptionProcessingEl.style.display = "none";
+            transcriptionErrorEl.style.display = "none";
+            transcriptionResultEl.style.display = "block";
+            subtitleControlsEl.style.display = "block";
+            if (transcriptionTextEl) {
+              transcriptionTextEl.textContent = data.text || "";
+            }
+          } else if (data.status === "failed") {
+            transcriptionProcessingEl.style.display = "none";
+            transcriptionResultEl.style.display = "none";
+            subtitleControlsEl.style.display = "none";
+            transcriptionErrorEl.style.display = "block";
+            if (transcriptionErrorTextEl) {
+              transcriptionErrorTextEl.textContent = data.error || "Transcription failed.";
+            }
+          }
+
+          if (data.subtitle_status === "processing") {
+            subtitleProcessingEl.style.display = "block";
+            subtitleResultEl.style.display = "none";
+            clearSubtitleVideo();
+            if (burnButtonEl) burnButtonEl.disabled = true;
+          } else if (data.subtitle_status === "completed") {
+            subtitleProcessingEl.style.display = "none";
+            subtitleResultEl.style.display = "block";
+            if (burnButtonEl) burnButtonEl.disabled = false;
+            if (subtitleResultTextEl) {
+              subtitleResultTextEl.textContent = "subtitles burned";
+            }
+            renderSubtitleVideo(data.karaoke_video_path || "");
+          } else if (data.subtitle_status === "failed") {
+            subtitleProcessingEl.style.display = "none";
+            subtitleResultEl.style.display = "block";
+            clearSubtitleVideo();
+            if (burnButtonEl) burnButtonEl.disabled = false;
+            if (subtitleResultTextEl) {
+              subtitleResultTextEl.textContent = data.subtitle_error || "Subtitle burn failed.";
+            }
+          } else {
+            subtitleProcessingEl.style.display = "none";
+            if (burnButtonEl) burnButtonEl.disabled = false;
+          }
+        }
+
+        const shouldPoll =
+          transcriptionProcessingEl.style.display !== "none" ||
+          subtitleProcessingEl.style.display !== "none";
+        if (!shouldPoll) return;
 
         let pollTimer = null;
 
@@ -80,43 +312,16 @@
             const response = await fetch("/transcription-status", { cache: "no-store" });
             if (!response.ok) return;
             const data = await response.json();
+            applyState(data);
 
-            if (data.status === "completed") {
-              processingEl.style.display = "none";
-              resultEl.style.display = "block";
-              if (textEl) {
-                textEl.textContent = data.text || "";
-              }
-              if (data.karaoke_video_path && !resultEl.querySelector("video")) {
-                const labelNode = document.createElement("p");
-                labelNode.className = "result-label";
-                labelNode.textContent = "karaoke video";
-
-                const videoNode = document.createElement("video");
-                videoNode.className = "preview-video";
-                videoNode.controls = true;
-                videoNode.preload = "metadata";
-
-                const sourceNode = document.createElement("source");
-                sourceNode.src = "/" + data.karaoke_video_path;
-                sourceNode.type = "video/mp4";
-
-                videoNode.appendChild(sourceNode);
-                resultEl.appendChild(labelNode);
-                resultEl.appendChild(videoNode);
-              }
-              if (pollTimer) clearInterval(pollTimer);
-            } else if (data.status === "failed") {
-              processingEl.style.display = "none";
-              resultEl.style.display = "block";
-              resultEl.innerHTML = "";
-              const errorNode = document.createElement("p");
-              errorNode.textContent = data.error || "Transcription failed.";
-              resultEl.appendChild(errorNode);
-              if (pollTimer) clearInterval(pollTimer);
+            const stillProcessing =
+              data.status === "processing" || data.subtitle_status === "processing";
+            if (!stillProcessing && pollTimer) {
+              clearInterval(pollTimer);
+              pollTimer = null;
             }
           } catch (_) {
-            // Keep polling until the background job finishes.
+            // Keep polling while work is running.
           }
         }
 

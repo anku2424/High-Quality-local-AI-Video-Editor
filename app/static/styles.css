@@ -61,6 +61,14 @@ input {
   font-size: 14px;
 }
 
+input[type="range"] {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  margin-bottom: 14px;
+  padding: 0;
+}
+
 button {
   border: 0;
   border-radius: 8px;
@@ -146,6 +154,40 @@ button:hover {
 .result-label {
   margin: 14px 0 10px;
   font-weight: 600;
+}
+
+.subtitle-control-form {
+  max-width: 420px;
+}
+
+.subtitle-control-form button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.swatch-grid {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(32px, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.swatch-input {
+  display: none;
+}
+
+.swatch-box {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 8px;
+  border: 2px solid #cbd5e1;
+  background: var(--swatch-color);
+  cursor: pointer;
+}
+
+.swatch-input:checked + .swatch-box {
+  border-color: #0f172a;
+  box-shadow: 0 0 0 2px #94a3b8;
 }
 
 .preview-video {

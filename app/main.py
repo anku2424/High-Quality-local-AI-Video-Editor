@@ -50,6 +50,34 @@ MAX_KARAOKE_WORDS = 7
 MAX_KARAOKE_DURATION_SECONDS = 3.8
 MAX_KARAOKE_GAP_SECONDS = 0.65
 MIN_WORDS_BEFORE_PUNCT_BREAK = 3
+DEFAULT_FONT_SIZE = 58
+MIN_FONT_SIZE = 24
+MAX_FONT_SIZE = 200
+DEFAULT_BORDER_SIZE = 3
+MIN_BORDER_SIZE = 0
+MAX_BORDER_SIZE = 20
+DEFAULT_HIGHLIGHT_COLOR = "#FFD700"
+DEFAULT_NON_HIGHLIGHT_COLOR = "#F2F2F2"
+DEFAULT_BORDER_COLOR = "#000000"
+TRANSPARENT_ASS_COLOR = "&HFF000000"
+COLOR_SWATCHES = [
+    "#FFFFFF",
+    "#F2F2F2",
+    "#D9D9D9",
+    "#C9C9C9",
+    "#000000",
+    "#FFD700",
+    "#FFC107",
+    "#FF9F1A",
+    "#FF6B6B",
+    "#FF4D88",
+    "#A55EEA",
+    "#7E57C2",
+    "#4D96FF",
+    "#00B8FF",
+    "#00C2A8",
+    "#57CC99",
+]
 
 transcription_jobs: dict[str, dict[str, Any]] = {}
 jobs_lock = Lock()
@@ -59,6 +87,58 @@ def mask_api_key(api_key: str) -> str:
     if len(api_key) <= 8:
         return "*" * len(api_key)
     return f"{api_key[:4]}{'*' * (len(api_key) - 8)}{api_key[-4:]}"
+
+
+def get_default_job_state() -> dict[str, Any]:
+    return {
+        "status": "idle",
+        "text": "",
+        "error": "",
+        "transcript_json_path": "",
+        "transcript_text_path": "",
+        "subtitle_status": "idle",
+        "subtitle_error": "",
+        "karaoke_ass_path": "",
+        "karaoke_video_path": "",
+        "font_size": DEFAULT_FONT_SIZE,
+        "border_size": DEFAULT_BORDER_SIZE,
+        "highlight_color": DEFAULT_HIGHLIGHT_COLOR,
+        "non_highlight_color": DEFAULT_NON_HIGHLIGHT_COLOR,
+        "border_color": DEFAULT_BORDER_COLOR,
+    }
+
+
+def clamp_font_size(raw_size: Any) -> int:
+    try:
+        font_size = int(raw_size)
+    except (TypeError, ValueError):
+        return DEFAULT_FONT_SIZE
+    return max(MIN_FONT_SIZE, min(MAX_FONT_SIZE, font_size))
+
+
+def clamp_border_size(raw_size: Any) -> int:
+    try:
+        border_size = int(raw_size)
+    except (TypeError, ValueError):
+        return DEFAULT_BORDER_SIZE
+    return max(MIN_BORDER_SIZE, min(MAX_BORDER_SIZE, border_size))
+
+
+def normalize_hex_color(raw_color: Any, default_color: str) -> str:
+    color = str(raw_color or "").strip()
+    if re.fullmatch(r"#?[0-9a-fA-F]{6}", color) is None:
+        return default_color
+    if not color.startswith("#"):
+        color = f"#{color}"
+    return color.upper()
+
+
+def hex_to_ass_bgr(hex_color: str, alpha_hex: str = "00") -> str:
+    safe_hex = normalize_hex_color(hex_color, DEFAULT_NON_HIGHLIGHT_COLOR)
+    rr = safe_hex[1:3]
+    gg = safe_hex[3:5]
+    bb = safe_hex[5:7]
+    return f"&H{alpha_hex}{bb}{gg}{rr}"
 
 
 def extract_audio_from_video(video_path: Path, audio_path: Path) -> None:
@@ -239,6 +319,11 @@ def create_karaoke_ass(
     segments: list[dict[str, Any]],
     words: list[dict[str, Any]],
     ass_path: Path,
+    font_size: int = DEFAULT_FONT_SIZE,
+    border_size: int = DEFAULT_BORDER_SIZE,
+    highlight_color: str = DEFAULT_HIGHLIGHT_COLOR,
+    non_highlight_color: str = DEFAULT_NON_HIGHLIGHT_COLOR,
+    border_color: str = DEFAULT_BORDER_COLOR,
 ) -> None:
     sorted_words = sorted(words, key=lambda item: to_float(item.get("start")))
     sorted_segments = sorted(segments, key=lambda item: to_float(item.get("start")))
@@ -281,6 +366,17 @@ def create_karaoke_ass(
     if not events:
         raise RuntimeError("No karaoke events were generated from transcript timestamps.")
 
+    safe_font_size = clamp_font_size(font_size)
+    safe_border_size = clamp_border_size(border_size)
+    safe_highlight_color = normalize_hex_color(highlight_color, DEFAULT_HIGHLIGHT_COLOR)
+    safe_non_highlight_color = normalize_hex_color(
+        non_highlight_color,
+        DEFAULT_NON_HIGHLIGHT_COLOR,
+    )
+    safe_border_color = normalize_hex_color(
+        border_color,
+        DEFAULT_BORDER_COLOR,
+    )
     header = """[Script Info]
 ScriptType: v4.00+
 Collisions: Normal
@@ -291,11 +387,18 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Karaoke,Arial,58,&H0038B8FF,&H00F0F0F0,&H00141414,&H64000000,0,0,0,0,100,100,0,0,1,2.6,0.6,2,90,90,70,1
+Style: Karaoke,Arial,{font_size},{primary},{secondary},{outline},{back},0,0,0,0,100,100,0,0,1,{outline_size},0.6,2,90,90,70,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
+""".format(
+        font_size=safe_font_size,
+        primary=hex_to_ass_bgr(safe_highlight_color),
+        secondary=hex_to_ass_bgr(safe_non_highlight_color),
+        outline=hex_to_ass_bgr(safe_border_color),
+        back=TRANSPARENT_ASS_COLOR,
+        outline_size=safe_border_size,
+    )
     lines = [header.rstrip("\n")]
     for event in events:
         start = format_ass_timestamp(to_float(event["start"]))
@@ -306,7 +409,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def burn_karaoke_subtitles(video_path: Path, ass_path: Path, output_path: Path) -> None:
-    ass_filter_path = ass_path.as_posix()
+    ass_filter_path = ass_path.resolve().as_posix().replace("'", r"\'")
     subprocess.run(
         [
             "ffmpeg",
@@ -314,7 +417,7 @@ def burn_karaoke_subtitles(video_path: Path, ass_path: Path, output_path: Path) 
             "-i",
             str(video_path),
             "-vf",
-            f"ass={ass_filter_path}",
+            f"ass='{ass_filter_path}'",
             "-c:v",
             "libx264",
             "-preset",
@@ -369,60 +472,89 @@ def transcribe_audio_file(
 
 def set_transcription_job(
     job_id: str,
-    status: str,
-    text: str = "",
-    error: str = "",
-    transcript_json_path: str = "",
-    transcript_text_path: str = "",
-    karaoke_ass_path: str = "",
-    karaoke_video_path: str = "",
+    status: Optional[str] = None,
+    text: Optional[str] = None,
+    error: Optional[str] = None,
+    transcript_json_path: Optional[str] = None,
+    transcript_text_path: Optional[str] = None,
+    subtitle_status: Optional[str] = None,
+    subtitle_error: Optional[str] = None,
+    karaoke_ass_path: Optional[str] = None,
+    karaoke_video_path: Optional[str] = None,
+    font_size: Optional[int] = None,
+    border_size: Optional[int] = None,
+    highlight_color: Optional[str] = None,
+    non_highlight_color: Optional[str] = None,
+    border_color: Optional[str] = None,
 ) -> None:
     with jobs_lock:
-        transcription_jobs[job_id] = {
-            "status": status,
-            "text": text,
-            "error": error,
-            "transcript_json_path": transcript_json_path,
-            "transcript_text_path": transcript_text_path,
-            "karaoke_ass_path": karaoke_ass_path,
-            "karaoke_video_path": karaoke_video_path,
-        }
+        state = get_default_job_state()
+        state.update(transcription_jobs.get(job_id, {}))
+
+        if status is not None:
+            state["status"] = status
+        if text is not None:
+            state["text"] = text
+        if error is not None:
+            state["error"] = error
+        if transcript_json_path is not None:
+            state["transcript_json_path"] = transcript_json_path
+        if transcript_text_path is not None:
+            state["transcript_text_path"] = transcript_text_path
+        if subtitle_status is not None:
+            state["subtitle_status"] = subtitle_status
+        if subtitle_error is not None:
+            state["subtitle_error"] = subtitle_error
+        if karaoke_ass_path is not None:
+            state["karaoke_ass_path"] = karaoke_ass_path
+        if karaoke_video_path is not None:
+            state["karaoke_video_path"] = karaoke_video_path
+        if font_size is not None:
+            state["font_size"] = clamp_font_size(font_size)
+        if border_size is not None:
+            state["border_size"] = clamp_border_size(border_size)
+        if highlight_color is not None:
+            state["highlight_color"] = normalize_hex_color(
+                highlight_color,
+                DEFAULT_HIGHLIGHT_COLOR,
+            )
+        if non_highlight_color is not None:
+            state["non_highlight_color"] = normalize_hex_color(
+                non_highlight_color,
+                DEFAULT_NON_HIGHLIGHT_COLOR,
+            )
+        if border_color is not None:
+            state["border_color"] = normalize_hex_color(
+                border_color,
+                DEFAULT_BORDER_COLOR,
+            )
+
+        transcription_jobs[job_id] = state
 
 
 def get_transcription_job(job_id: Optional[str]) -> dict[str, Any]:
     if not job_id:
-        return {
-            "status": "idle",
-            "text": "",
-            "error": "",
-            "transcript_json_path": "",
-            "transcript_text_path": "",
-            "karaoke_ass_path": "",
-            "karaoke_video_path": "",
-        }
+        return get_default_job_state()
     with jobs_lock:
-        return transcription_jobs.get(
-            job_id,
-            {
-                "status": "idle",
-                "text": "",
-                "error": "",
-                "transcript_json_path": "",
-                "transcript_text_path": "",
-                "karaoke_ass_path": "",
-                "karaoke_video_path": "",
-            },
-        )
+        state = get_default_job_state()
+        state.update(transcription_jobs.get(job_id, {}))
+        return state
 
 
-def run_transcription_job(job_id: str, audio_path: str, video_path: str, api_key: str) -> None:
-    set_transcription_job(job_id, "processing")
+def run_transcription_job(job_id: str, audio_path: str, api_key: str) -> None:
+    set_transcription_job(
+        job_id,
+        status="processing",
+        error="",
+        subtitle_status="idle",
+        subtitle_error="",
+        karaoke_ass_path="",
+        karaoke_video_path="",
+    )
     try:
         text, segments, words = transcribe_audio_file(Path(audio_path), api_key, job_id)
         transcript_text_path = TRANSCRIPT_DIR / f"{job_id}.txt"
         transcript_json_path = TRANSCRIPT_DIR / f"{job_id}.json"
-        karaoke_ass_path = SUBTITLE_DIR / f"{job_id}.ass"
-        karaoke_video_path = RENDER_DIR / f"{job_id}_karaoke.mp4"
 
         transcript_text_path.write_text(text, encoding="utf-8")
         transcript_json_path.write_text(
@@ -437,23 +569,97 @@ def run_transcription_job(job_id: str, audio_path: str, video_path: str, api_key
             ),
             encoding="utf-8",
         )
-        create_karaoke_ass(segments, words, karaoke_ass_path)
-        burn_karaoke_subtitles(Path(video_path), karaoke_ass_path, karaoke_video_path)
         set_transcription_job(
             job_id,
-            "completed",
+            status="completed",
             text=text,
             transcript_json_path=str(transcript_json_path),
             transcript_text_path=str(transcript_text_path),
-            karaoke_ass_path=str(karaoke_ass_path),
-            karaoke_video_path=str(karaoke_video_path),
+            subtitle_status="idle",
+            subtitle_error="",
         )
     except Exception as exc:
         logger.exception("Transcription job failed for job_id=%s audio_path=%s", job_id, audio_path)
         set_transcription_job(
             job_id,
-            "failed",
+            status="failed",
             error=f"{type(exc).__name__}: {exc}",
+            subtitle_status="idle",
+        )
+
+
+def run_subtitle_burn_job(
+    job_id: str,
+    video_path: str,
+    transcript_json_path: str,
+    font_size: int,
+    border_size: int,
+    highlight_color: str,
+    non_highlight_color: str,
+    border_color: str,
+) -> None:
+    safe_font_size = clamp_font_size(font_size)
+    safe_border_size = clamp_border_size(border_size)
+    safe_highlight_color = normalize_hex_color(highlight_color, DEFAULT_HIGHLIGHT_COLOR)
+    safe_non_highlight_color = normalize_hex_color(
+        non_highlight_color,
+        DEFAULT_NON_HIGHLIGHT_COLOR,
+    )
+    safe_border_color = normalize_hex_color(
+        border_color,
+        DEFAULT_BORDER_COLOR,
+    )
+    set_transcription_job(
+        job_id,
+        subtitle_status="processing",
+        subtitle_error="",
+        karaoke_ass_path="",
+        karaoke_video_path="",
+        font_size=safe_font_size,
+        border_size=safe_border_size,
+        highlight_color=safe_highlight_color,
+        non_highlight_color=safe_non_highlight_color,
+        border_color=safe_border_color,
+    )
+
+    try:
+        transcript_path = Path(transcript_json_path)
+        if not transcript_path.exists():
+            raise RuntimeError("Transcript JSON not found. Please transcribe again.")
+
+        payload = json.loads(transcript_path.read_text(encoding="utf-8"))
+        segments = payload.get("segments") or []
+        words = payload.get("words") or []
+
+        render_id = uuid4().hex[:8]
+        karaoke_ass_path = SUBTITLE_DIR / f"{job_id}_{render_id}.ass"
+        karaoke_video_path = RENDER_DIR / f"{job_id}_{render_id}_karaoke.mp4"
+
+        create_karaoke_ass(
+            segments=segments,
+            words=words,
+            ass_path=karaoke_ass_path,
+            font_size=safe_font_size,
+            border_size=safe_border_size,
+            highlight_color=safe_highlight_color,
+            non_highlight_color=safe_non_highlight_color,
+            border_color=safe_border_color,
+        )
+        burn_karaoke_subtitles(Path(video_path), karaoke_ass_path, karaoke_video_path)
+
+        set_transcription_job(
+            job_id,
+            subtitle_status="completed",
+            subtitle_error="",
+            karaoke_ass_path=str(karaoke_ass_path),
+            karaoke_video_path=str(karaoke_video_path),
+        )
+    except Exception as exc:
+        logger.exception("Subtitle burn failed for job_id=%s video_path=%s", job_id, video_path)
+        set_transcription_job(
+            job_id,
+            subtitle_status="failed",
+            subtitle_error=f"{type(exc).__name__}: {exc}",
         )
 
 
@@ -484,7 +690,15 @@ async def studio(request: Request):
             "transcription_status": transcription_job["status"],
             "transcription_text": transcription_job["text"],
             "transcription_error": transcription_job["error"],
+            "subtitle_status": transcription_job["subtitle_status"],
+            "subtitle_error": transcription_job["subtitle_error"],
             "karaoke_video_path": transcription_job["karaoke_video_path"],
+            "selected_font_size": transcription_job["font_size"],
+            "selected_border_size": transcription_job["border_size"],
+            "selected_highlight_color": transcription_job["highlight_color"],
+            "selected_non_highlight_color": transcription_job["non_highlight_color"],
+            "selected_border_color": transcription_job["border_color"],
+            "color_swatches": COLOR_SWATCHES,
         },
     )
 
@@ -517,17 +731,98 @@ async def upload_video(
     await video.close()
     extract_audio_from_video(target_file, target_audio)
     job_id = uuid4().hex
-    set_transcription_job(job_id, "processing")
-    background_tasks.add_task(run_transcription_job, job_id, str(target_audio), str(target_file), api_key)
+    set_transcription_job(
+        job_id,
+        status="processing",
+        error="",
+        subtitle_status="idle",
+        subtitle_error="",
+        karaoke_ass_path="",
+        karaoke_video_path="",
+        font_size=DEFAULT_FONT_SIZE,
+        border_size=DEFAULT_BORDER_SIZE,
+        highlight_color=DEFAULT_HIGHLIGHT_COLOR,
+        non_highlight_color=DEFAULT_NON_HIGHLIGHT_COLOR,
+        border_color=DEFAULT_BORDER_COLOR,
+    )
+    background_tasks.add_task(run_transcription_job, job_id, str(target_audio), api_key)
 
     request.session["uploaded_video_path"] = str(target_file)
     request.session["uploaded_audio_path"] = str(target_audio)
     request.session["transcription_job_id"] = job_id
     request.session["transcription_text_path"] = str(TRANSCRIPT_DIR / f"{job_id}.txt")
     request.session["transcription_json_path"] = str(TRANSCRIPT_DIR / f"{job_id}.json")
-    request.session["karaoke_ass_path"] = str(SUBTITLE_DIR / f"{job_id}.ass")
-    request.session["karaoke_video_path"] = str(RENDER_DIR / f"{job_id}_karaoke.mp4")
+    request.session["karaoke_ass_path"] = ""
+    request.session["karaoke_video_path"] = ""
     request.session["video_uploaded"] = True
+    return RedirectResponse(url="/studio", status_code=303)
+
+
+@app.post("/burn-subtitles")
+async def burn_subtitles(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    font_size: int = Form(DEFAULT_FONT_SIZE),
+    border_size: int = Form(DEFAULT_BORDER_SIZE),
+    highlight_color: str = Form(DEFAULT_HIGHLIGHT_COLOR),
+    non_highlight_color: str = Form(DEFAULT_NON_HIGHLIGHT_COLOR),
+    border_color: str = Form(DEFAULT_BORDER_COLOR),
+):
+    job_id = request.session.get("transcription_job_id")
+    if not job_id:
+        return RedirectResponse(url="/studio", status_code=303)
+
+    job = get_transcription_job(job_id)
+    if job.get("status") != "completed":
+        return RedirectResponse(url="/studio", status_code=303)
+    if job.get("subtitle_status") == "processing":
+        return RedirectResponse(url="/studio", status_code=303)
+
+    video_path = request.session.get("uploaded_video_path")
+    transcript_json_path = request.session.get("transcription_json_path")
+    if not video_path or not transcript_json_path:
+        set_transcription_job(
+            job_id,
+            subtitle_status="failed",
+            subtitle_error="Missing video or transcript path.",
+        )
+        return RedirectResponse(url="/studio", status_code=303)
+
+    safe_font_size = clamp_font_size(font_size)
+    safe_border_size = clamp_border_size(border_size)
+    safe_highlight_color = normalize_hex_color(highlight_color, DEFAULT_HIGHLIGHT_COLOR)
+    safe_non_highlight_color = normalize_hex_color(
+        non_highlight_color,
+        DEFAULT_NON_HIGHLIGHT_COLOR,
+    )
+    safe_border_color = normalize_hex_color(
+        border_color,
+        DEFAULT_BORDER_COLOR,
+    )
+    set_transcription_job(
+        job_id,
+        subtitle_status="processing",
+        subtitle_error="",
+        karaoke_ass_path="",
+        karaoke_video_path="",
+        font_size=safe_font_size,
+        border_size=safe_border_size,
+        highlight_color=safe_highlight_color,
+        non_highlight_color=safe_non_highlight_color,
+        border_color=safe_border_color,
+    )
+
+    background_tasks.add_task(
+        run_subtitle_burn_job,
+        job_id,
+        str(video_path),
+        str(transcript_json_path),
+        safe_font_size,
+        safe_border_size,
+        safe_highlight_color,
+        safe_non_highlight_color,
+        safe_border_color,
+    )
     return RedirectResponse(url="/studio", status_code=303)
 
 
