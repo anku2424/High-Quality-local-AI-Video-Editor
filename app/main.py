@@ -378,6 +378,31 @@ def build_broll_overlay_plan(
     return overlay_plan
 
 
+def build_broll_placement_clips(
+    overlay_plan: list[dict[str, Any]],
+    video_duration: float,
+) -> list[dict[str, Any]]:
+    clips: list[dict[str, Any]] = []
+    max_duration = max(0.0, video_duration)
+    for item in overlay_plan:
+        image_path = item["image_path"]
+        for start_time, end_time in item["placements"]:
+            start = min(max(0.0, float(start_time)), max_duration)
+            end = min(max(0.0, float(end_time)), max_duration)
+            if end <= start:
+                continue
+            clips.append(
+                {
+                    "image_path": image_path,
+                    "start": start,
+                    "end": end,
+                    "duration": end - start,
+                }
+            )
+    clips.sort(key=lambda clip: (clip["start"], clip["end"]))
+    return clips
+
+
 def get_video_dimensions(video_path: Path) -> tuple[int, int]:
     try:
         result = subprocess.run(
@@ -410,8 +435,47 @@ def get_video_dimensions(video_path: Path) -> tuple[int, int]:
     return 1920, 1080
 
 
-def build_overlay_enable_expression(placements: list[tuple[float, float]]) -> str:
-    return "+".join(f"between(t,{start:.3f},{end:.3f})" for start, end in placements)
+def get_video_duration_seconds(video_path: Path) -> float:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(video_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return max(0.0, to_float((result.stdout or "").strip(), 0.0))
+    except Exception:
+        logger.warning("Failed to probe video duration for %s; using fallback.", video_path)
+        return 0.0
+
+
+def run_ffmpeg_checked(command: list[str], error_label: str) -> None:
+    result = subprocess.run(
+        command,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        stderr_text = (result.stderr or "").strip()
+        if stderr_text:
+            logger.error(
+                "%s failed (code=%s):\n%s",
+                error_label,
+                result.returncode,
+                stderr_text[-4000:],
+            )
+        raise RuntimeError(f"{error_label} failed with exit code {result.returncode}.")
 
 
 def render_broll_video(
@@ -430,67 +494,105 @@ def render_broll_video(
         raise RuntimeError("No valid b-roll placements were available to render.")
 
     video_width, video_height = get_video_dimensions(video_path)
+    video_duration = get_video_duration_seconds(video_path)
+    clips = build_broll_placement_clips(overlay_plan, video_duration)
+    if not clips:
+        raise RuntimeError("No in-range b-roll clips were available to render.")
 
-    ffmpeg_cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(video_path),
-    ]
-    for item in overlay_plan:
-        ffmpeg_cmd.extend(
-            [
-                "-loop",
-                "1",
+    render_id = uuid4().hex[:8]
+    temp_dir = RENDER_DIR / f".broll_tmp_{render_id}"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    scale_filter = f"scale=w={video_width}:h={video_height}:force_original_aspect_ratio=increase,crop={video_width}:{video_height}"
+
+    # Normalize all images to same resolution and format once, then reuse with fast looped inputs.
+    placements_by_source: dict[Path, list[tuple[float, float]]] = {}
+    for clip in clips:
+        source_path = Path(str(clip["image_path"]))
+        placements_by_source.setdefault(source_path, []).append(
+            (float(clip["start"]), float(clip["end"]))
+        )
+
+    prepared_inputs: list[dict[str, Any]] = []
+    try:
+        for idx, source_path in enumerate(sorted(placements_by_source.keys()), start=1):
+            prepared_path = temp_dir / f"prepared_{idx:03d}.jpg"
+            prep_cmd = [
+                "ffmpeg",
+                "-y",
                 "-i",
-                str(item["image_path"]),
+                str(source_path),
+                "-frames:v",
+                "1",
+                "-vf",
+                scale_filter,
+                str(prepared_path),
+            ]
+            run_ffmpeg_checked(prep_cmd, "ffmpeg b-roll image normalization")
+            prepared_inputs.append(
+                {
+                    "prepared_path": prepared_path,
+                    "placements": sorted(placements_by_source[source_path], key=lambda item: item[0]),
+                }
+            )
+
+        if not prepared_inputs:
+            raise RuntimeError("No b-roll images were prepared for rendering.")
+
+        render_cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_path),
+        ]
+        for prepared in prepared_inputs:
+            render_cmd.extend(
+                [
+                    "-loop",
+                    "1",
+                    "-i",
+                    str(prepared["prepared_path"]),
+                ]
+            )
+
+        filter_parts = ["[0:v]setpts=PTS-STARTPTS[v0]"]
+        current_label = "v0"
+        for idx, prepared in enumerate(prepared_inputs, start=1):
+            next_label = f"v{idx}"
+            enable_expression = "+".join(
+                f"between(t,{start:.3f},{end:.3f})" for start, end in prepared["placements"]
+            )
+            filter_parts.append(
+                f"[{current_label}][{idx}:v]overlay=x=0:y=0:enable='{enable_expression}':eof_action=pass[{next_label}]"
+            )
+            current_label = next_label
+
+        render_cmd.extend(
+            [
+                "-filter_complex",
+                ";".join(filter_parts),
+                "-map",
+                f"[{current_label}]",
+                "-map",
+                "0:a?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "18",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-shortest",
+                str(output_path),
             ]
         )
-
-    filter_parts = ["[0:v]setpts=PTS-STARTPTS[v0]"]
-    current_label = "v0"
-    for index, item in enumerate(overlay_plan, start=1):
-        image_label = f"img{index}"
-        next_label = f"v{index}"
-        enable_expression = build_overlay_enable_expression(item["placements"])
-        filter_parts.append(
-            f"[{index}:v]scale=w={video_width}:h={video_height}:force_original_aspect_ratio=increase,crop={video_width}:{video_height}[{image_label}]"
-        )
-        filter_parts.append(
-            f"[{current_label}][{image_label}]overlay=x=0:y=0:enable='{enable_expression}':shortest=1:eof_action=pass[{next_label}]"
-        )
-        current_label = next_label
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    ffmpeg_cmd.extend(
-        [
-            "-filter_complex",
-            ";".join(filter_parts),
-            "-map",
-            f"[{current_label}]",
-            "-map",
-            "0:a?",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "18",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-shortest",
-            str(output_path),
-        ]
-    )
-
-    subprocess.run(
-        ffmpeg_cmd,
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+        run_ffmpeg_checked(render_cmd, "ffmpeg b-roll overlay render")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def extract_audio_from_video(video_path: Path, audio_path: Path) -> None:
