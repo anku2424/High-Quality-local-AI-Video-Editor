@@ -47,6 +47,7 @@ uvicorn app.main:app --reload
 
 - After saving your API key, the app redirects to `/studio`.
 - The studio page lets you clear the key and upload a video.
+- You can also upload a local folder of b-roll images from the studio page.
 - After upload, a success prompt shows: `video uploaded`.
 - After transcription completes, choose subtitle font size (slider up to `200px`), subtitle border size (slider), and colours for highlight/non-highlight/border from swatch boxes, then click `Burn Subtitles`.
 - Burned karaoke videos are saved in `uploads/rendered/`.

@@ -4,7 +4,7 @@ import subprocess
 import json
 import logging
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import Lock
 from typing import Any, Optional
 from uuid import uuid4
@@ -35,12 +35,14 @@ CHUNK_DIR = UPLOAD_DIR / "chunks"
 TRANSCRIPT_DIR = UPLOAD_DIR / "transcripts"
 SUBTITLE_DIR = UPLOAD_DIR / "subtitles"
 RENDER_DIR = UPLOAD_DIR / "rendered"
+BROLL_DIR = UPLOAD_DIR / "broll"
 VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 CHUNK_DIR.mkdir(parents=True, exist_ok=True)
 TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
 SUBTITLE_DIR.mkdir(parents=True, exist_ok=True)
 RENDER_DIR.mkdir(parents=True, exist_ok=True)
+BROLL_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_TRANSCRIBE_FILE_BYTES = 25 * 1024 * 1024
 # 16kHz mono PCM WAV is ~32KB/s. Keep chunk duration under the API limit with margin.
@@ -60,6 +62,54 @@ DEFAULT_HIGHLIGHT_COLOR = "#FFD700"
 DEFAULT_NON_HIGHLIGHT_COLOR = "#F2F2F2"
 DEFAULT_BORDER_COLOR = "#000000"
 TRANSPARENT_ASS_COLOR = "&HFF000000"
+BROLL_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+BROLL_PLACEMENT_PROMPT_ID = "pmpt_69a1c74939e48197b22c4c4135b557890eb70db7c075888b"
+BROLL_PLACEMENT_PROMPT_VERSION = "3"
+BROLL_PLACEMENT_SCHEMA = {
+    "name": "image_placement_response",
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "images": {
+                "type": "array",
+                "description": "List of image placements with non-overlapping time ranges.",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "image_name": {
+                            "type": "string",
+                            "description": "The name of the image file.",
+                        },
+                        "placements": {
+                            "type": "array",
+                            "description": "List of time ranges where the image should appear.",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "start_time": {
+                                        "type": "number",
+                                        "description": "Start time in seconds (inclusive).",
+                                    },
+                                    "end_time": {
+                                        "type": "number",
+                                        "description": "End time in seconds (exclusive).",
+                                    },
+                                },
+                                "required": ["start_time", "end_time"],
+                            },
+                        },
+                    },
+                    "required": ["image_name", "placements"],
+                },
+            }
+        },
+        "required": ["images"],
+    },
+    "strict": True,
+}
 COLOR_SWATCHES = [
     "#FFFFFF",
     "#F2F2F2",
@@ -139,6 +189,308 @@ def hex_to_ass_bgr(hex_color: str, alpha_hex: str = "00") -> str:
     gg = safe_hex[3:5]
     bb = safe_hex[5:7]
     return f"&H{alpha_hex}{bb}{gg}{rr}"
+
+
+def is_supported_broll_image(filename: str) -> bool:
+    return Path(filename).suffix.lower() in BROLL_IMAGE_EXTENSIONS
+
+
+def sanitize_uploaded_relative_path(raw_name: str) -> Path:
+    candidate = (raw_name or "").replace("\\", "/").strip()
+    parts: list[str] = []
+    for part in PurePosixPath(candidate).parts:
+        if part in {"", ".", ".."}:
+            continue
+        safe_part = re.sub(r"[^A-Za-z0-9._ -]", "_", part).strip()
+        if safe_part:
+            parts.append(safe_part)
+
+    if not parts:
+        raise ValueError("Invalid uploaded file path.")
+    return Path(*parts)
+
+
+def load_word_timestamps(transcript_json_path: str) -> list[dict[str, Any]]:
+    payload = json.loads(Path(transcript_json_path).read_text(encoding="utf-8"))
+    words = payload.get("words") or []
+    if not isinstance(words, list):
+        return []
+    normalized_words: list[dict[str, Any]] = []
+    for item in words:
+        if not isinstance(item, dict):
+            continue
+        if "start" not in item or "end" not in item or "word" not in item:
+            continue
+        normalized_words.append(
+            {
+                "start": item["start"],
+                "end": item["end"],
+                "word": item["word"],
+            }
+        )
+    return normalized_words
+
+
+def list_broll_image_names(broll_dir_path: str) -> list[str]:
+    root = Path(broll_dir_path)
+    if not root.exists():
+        return []
+    names: list[str] = []
+    for file_path in root.rglob("*"):
+        if not file_path.is_file():
+            continue
+        if file_path.suffix.lower() not in BROLL_IMAGE_EXTENSIONS:
+            continue
+        names.append(file_path.name)
+    return sorted(dict.fromkeys(names))
+
+
+def generate_broll_placement_result(
+    api_key: str,
+    transcript_json_path: str,
+    broll_dir_path: str,
+) -> dict[str, Any]:
+    transcript_path = Path(transcript_json_path)
+    if not transcript_path.exists():
+        raise ValueError("Transcript JSON file not found.")
+
+    broll_path = Path(broll_dir_path)
+    if not broll_path.exists():
+        raise ValueError("B-roll folder path not found.")
+
+    word_timestamps = load_word_timestamps(str(transcript_path))
+    broll_image_names = list_broll_image_names(str(broll_path))
+    if not word_timestamps:
+        raise ValueError("No word timestamps available.")
+    if not broll_image_names:
+        raise ValueError("No b-roll images found.")
+
+    client = OpenAI(api_key=api_key)
+    response = client.responses.create(
+        prompt={
+            "id": BROLL_PLACEMENT_PROMPT_ID,
+            # "version": BROLL_PLACEMENT_PROMPT_VERSION,
+            "variables": {
+                "word_timestamps": json.dumps(word_timestamps, ensure_ascii=False),
+                "broll_image_names": json.dumps(broll_image_names, ensure_ascii=False),
+            },
+        },
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": BROLL_PLACEMENT_SCHEMA["name"],
+                "schema": BROLL_PLACEMENT_SCHEMA["schema"],
+                "strict": BROLL_PLACEMENT_SCHEMA["strict"],
+            }
+        },
+    )
+
+    output_text = (response.output_text or "").strip()
+    if not output_text:
+        logger.error("B-roll placement response had empty output_text. response_id=%s", response.id)
+        raise RuntimeError("B-roll placement response was empty.")
+
+    try:
+        placement_result = json.loads(output_text)
+    except json.JSONDecodeError as exc:
+        logger.exception("B-roll placement response is not valid JSON. response_id=%s", response.id)
+        raise RuntimeError("B-roll placement response is not valid JSON.") from exc
+
+    pretty = json.dumps(placement_result, indent=2, ensure_ascii=False)
+    print("\nB-roll placement result:")
+    print(pretty)
+    logger.info("B-roll placement result:\n%s", pretty)
+    return placement_result
+
+
+def index_broll_images_by_name(broll_dir_path: Path) -> dict[str, Path]:
+    index: dict[str, Path] = {}
+    duplicate_names: set[str] = set()
+
+    for file_path in sorted(broll_dir_path.rglob("*")):
+        if not file_path.is_file():
+            continue
+        if file_path.suffix.lower() not in BROLL_IMAGE_EXTENSIONS:
+            continue
+        if file_path.name in index:
+            duplicate_names.add(file_path.name)
+            continue
+        index[file_path.name] = file_path
+
+    if duplicate_names:
+        logger.warning(
+            "Duplicate b-roll image names detected; first file is used for: %s",
+            ", ".join(sorted(duplicate_names)),
+        )
+    return index
+
+
+def build_broll_overlay_plan(
+    placement_result: dict[str, Any],
+    broll_dir_path: Path,
+) -> list[dict[str, Any]]:
+    image_entries = placement_result.get("images")
+    if not isinstance(image_entries, list):
+        raise RuntimeError("B-roll placement response is missing 'images'.")
+
+    image_index = index_broll_images_by_name(broll_dir_path)
+    overlay_plan: list[dict[str, Any]] = []
+
+    for image_entry in image_entries:
+        if not isinstance(image_entry, dict):
+            continue
+
+        image_name = str(image_entry.get("image_name") or "").strip()
+        if not image_name:
+            continue
+
+        image_path = image_index.get(image_name)
+        if image_path is None:
+            logger.warning("Skipping missing b-roll image from placement result: %s", image_name)
+            continue
+
+        raw_placements = image_entry.get("placements")
+        if not isinstance(raw_placements, list):
+            continue
+
+        placements: list[tuple[float, float]] = []
+        for placement in raw_placements:
+            if not isinstance(placement, dict):
+                continue
+            start_time = max(0.0, to_float(placement.get("start_time"), -1.0))
+            end_time = max(0.0, to_float(placement.get("end_time"), -1.0))
+            if end_time <= start_time:
+                continue
+            placements.append((start_time, end_time))
+
+        if not placements:
+            continue
+
+        placements.sort(key=lambda item: item[0])
+        overlay_plan.append(
+            {
+                "image_name": image_name,
+                "image_path": image_path,
+                "placements": placements,
+            }
+        )
+
+    return overlay_plan
+
+
+def get_video_dimensions(video_path: Path) -> tuple[int, int]:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "json",
+                str(video_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        payload = json.loads(result.stdout or "{}")
+        streams = payload.get("streams") or []
+        if streams:
+            width = int(streams[0].get("width") or 0)
+            height = int(streams[0].get("height") or 0)
+            if width > 0 and height > 0:
+                return width, height
+    except Exception:
+        logger.warning("Failed to probe video dimensions for %s; using fallback.", video_path)
+
+    return 1920, 1080
+
+
+def build_overlay_enable_expression(placements: list[tuple[float, float]]) -> str:
+    return "+".join(f"between(t,{start:.3f},{end:.3f})" for start, end in placements)
+
+
+def render_broll_video(
+    video_path: Path,
+    broll_dir_path: Path,
+    placement_result: dict[str, Any],
+    output_path: Path,
+) -> None:
+    if not video_path.exists():
+        raise ValueError("Source video for b-roll render was not found.")
+    if not broll_dir_path.exists():
+        raise ValueError("B-roll directory was not found.")
+
+    overlay_plan = build_broll_overlay_plan(placement_result, broll_dir_path)
+    if not overlay_plan:
+        raise RuntimeError("No valid b-roll placements were available to render.")
+
+    video_width, video_height = get_video_dimensions(video_path)
+
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video_path),
+    ]
+    for item in overlay_plan:
+        ffmpeg_cmd.extend(
+            [
+                "-loop",
+                "1",
+                "-i",
+                str(item["image_path"]),
+            ]
+        )
+
+    filter_parts = ["[0:v]setpts=PTS-STARTPTS[v0]"]
+    current_label = "v0"
+    for index, item in enumerate(overlay_plan, start=1):
+        image_label = f"img{index}"
+        next_label = f"v{index}"
+        enable_expression = build_overlay_enable_expression(item["placements"])
+        filter_parts.append(
+            f"[{index}:v]scale=w={video_width}:h={video_height}:force_original_aspect_ratio=increase,crop={video_width}:{video_height}[{image_label}]"
+        )
+        filter_parts.append(
+            f"[{current_label}][{image_label}]overlay=x=0:y=0:enable='{enable_expression}':shortest=1:eof_action=pass[{next_label}]"
+        )
+        current_label = next_label
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    ffmpeg_cmd.extend(
+        [
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            f"[{current_label}]",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+            str(output_path),
+        ]
+    )
+
+    subprocess.run(
+        ffmpeg_cmd,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def extract_audio_from_video(video_path: Path, audio_path: Path) -> None:
@@ -681,12 +1033,18 @@ async def studio(request: Request):
     video_uploaded = request.session.pop("video_uploaded", False)
     job_id = request.session.get("transcription_job_id")
     transcription_job = get_transcription_job(job_id)
+    broll_uploaded = request.session.pop("broll_uploaded", False)
+    broll_image_count = int(request.session.get("broll_image_count", 0))
+    broll_rendered_video_path = request.session.get("broll_rendered_video_path", "")
+    broll_render_error = request.session.pop("broll_render_error", "")
     return templates.TemplateResponse(
         "studio.html",
         {
             "request": request,
             "masked_key": mask_api_key(api_key),
             "video_uploaded": video_uploaded,
+            "broll_uploaded": broll_uploaded,
+            "broll_image_count": broll_image_count,
             "transcription_status": transcription_job["status"],
             "transcription_text": transcription_job["text"],
             "transcription_error": transcription_job["error"],
@@ -699,6 +1057,8 @@ async def studio(request: Request):
             "selected_non_highlight_color": transcription_job["non_highlight_color"],
             "selected_border_color": transcription_job["border_color"],
             "color_swatches": COLOR_SWATCHES,
+            "broll_rendered_video_path": broll_rendered_video_path,
+            "broll_render_error": broll_render_error,
         },
     )
 
@@ -754,7 +1114,93 @@ async def upload_video(
     request.session["transcription_json_path"] = str(TRANSCRIPT_DIR / f"{job_id}.json")
     request.session["karaoke_ass_path"] = ""
     request.session["karaoke_video_path"] = ""
+    request.session.pop("broll_set_id", None)
+    request.session.pop("broll_dir_path", None)
+    request.session.pop("broll_image_count", None)
+    request.session.pop("broll_uploaded", None)
+    request.session.pop("broll_rendered_video_path", None)
+    request.session.pop("broll_render_error", None)
     request.session["video_uploaded"] = True
+    return RedirectResponse(url="/studio", status_code=303)
+
+
+@app.post("/upload-broll-folder")
+async def upload_broll_folder(
+    request: Request,
+    broll_images: list[UploadFile] = File(...),
+):
+    api_key = request.session.get("openai_api_key")
+    if not api_key:
+        return RedirectResponse(url="/", status_code=303)
+
+    broll_set_id = uuid4().hex
+    target_root = BROLL_DIR / broll_set_id
+    saved_count = 0
+
+    for image in broll_images:
+        filename = image.filename or ""
+        if not is_supported_broll_image(filename):
+            await image.close()
+            continue
+
+        try:
+            relative_path = sanitize_uploaded_relative_path(filename)
+        except ValueError:
+            await image.close()
+            continue
+
+        target_file = target_root / relative_path
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        with target_file.open("wb") as buffer:
+            shutil.copyfileobj(image.file, buffer)
+        await image.close()
+        saved_count += 1
+
+    request.session["broll_set_id"] = broll_set_id
+    request.session["broll_dir_path"] = str(target_root)
+    request.session["broll_image_count"] = saved_count
+    request.session["broll_uploaded"] = True
+    request.session["broll_rendered_video_path"] = ""
+    request.session["broll_render_error"] = ""
+
+    transcript_json_path = request.session.get("transcription_json_path")
+    if saved_count > 0 and transcript_json_path:
+        try:
+            placement_result = generate_broll_placement_result(
+                api_key=api_key,
+                transcript_json_path=str(transcript_json_path),
+                broll_dir_path=str(target_root),
+            )
+            placement_path = target_root / "placement_result.json"
+            placement_path.write_text(
+                json.dumps(placement_result, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            job_id = request.session.get("transcription_job_id")
+            job = get_transcription_job(job_id)
+            source_video_path = (
+                job.get("karaoke_video_path") or request.session.get("uploaded_video_path")
+            )
+            if not source_video_path:
+                raise RuntimeError("No source video path found for b-roll rendering.")
+
+            broll_video_output_path = RENDER_DIR / f"{broll_set_id}_broll.mp4"
+            render_broll_video(
+                video_path=Path(str(source_video_path)),
+                broll_dir_path=target_root,
+                placement_result=placement_result,
+                output_path=broll_video_output_path,
+            )
+            request.session["broll_rendered_video_path"] = str(broll_video_output_path)
+            logger.info("B-roll video rendered at %s", broll_video_output_path)
+        except Exception:
+            request.session["broll_render_error"] = "B-roll render failed."
+            logger.exception(
+                "Automatic b-roll placement/render failed for broll_set_id=%s",
+                broll_set_id,
+            )
+
     return RedirectResponse(url="/studio", status_code=303)
 
 
@@ -811,6 +1257,8 @@ async def burn_subtitles(
         non_highlight_color=safe_non_highlight_color,
         border_color=safe_border_color,
     )
+    request.session["broll_rendered_video_path"] = ""
+    request.session["broll_render_error"] = ""
 
     background_tasks.add_task(
         run_subtitle_burn_job,
@@ -833,6 +1281,34 @@ async def transcription_status(request: Request):
     return JSONResponse(job)
 
 
+@app.post("/generate-broll-placement")
+async def generate_broll_placement(request: Request):
+    api_key = request.session.get("openai_api_key")
+    if not api_key:
+        return JSONResponse({"error": "Missing API key in session."}, status_code=400)
+
+    transcript_json_path = request.session.get("transcription_json_path")
+    if not transcript_json_path:
+        return JSONResponse({"error": "Missing transcript JSON path."}, status_code=400)
+
+    broll_dir_path = request.session.get("broll_dir_path")
+    if not broll_dir_path:
+        return JSONResponse({"error": "Missing b-roll folder upload."}, status_code=400)
+
+    try:
+        placement_result = generate_broll_placement_result(
+            api_key=api_key,
+            transcript_json_path=str(transcript_json_path),
+            broll_dir_path=str(broll_dir_path),
+        )
+        return JSONResponse({"result": placement_result})
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception:
+        logger.exception("B-roll placement generation failed.")
+        return JSONResponse({"error": "B-roll placement generation failed."}, status_code=500)
+
+
 @app.post("/clear-key")
 async def clear_key(request: Request):
     job_id = request.session.get("transcription_job_id")
@@ -847,5 +1323,11 @@ async def clear_key(request: Request):
     request.session.pop("transcription_json_path", None)
     request.session.pop("karaoke_ass_path", None)
     request.session.pop("karaoke_video_path", None)
+    request.session.pop("broll_set_id", None)
+    request.session.pop("broll_dir_path", None)
+    request.session.pop("broll_image_count", None)
+    request.session.pop("broll_uploaded", None)
+    request.session.pop("broll_rendered_video_path", None)
+    request.session.pop("broll_render_error", None)
     request.session.pop("video_uploaded", None)
     return RedirectResponse(url="/", status_code=303)

@@ -189,6 +189,47 @@
         {% endif %}
         {% endif %}
       </section>
+
+      <section
+        id="broll-section"
+        {% if subtitle_status != "completed" %}style="display: none"{% endif %}
+      >
+        <form action="/upload-broll-folder" method="post" enctype="multipart/form-data" class="card">
+          <label for="broll_images">B-roll Folder</label>
+          <input
+            id="broll_images"
+            name="broll_images"
+            type="file"
+            accept="image/*"
+            webkitdirectory
+            directory
+            multiple
+            required
+          />
+          <button type="submit">Upload B-roll Folder</button>
+        </form>
+
+        {% if broll_uploaded %}
+        <section class="status success">
+          <p>b-roll folder uploaded ({{ broll_image_count }} images)</p>
+        </section>
+        {% endif %}
+
+        {% if broll_render_error %}
+        <section class="status">
+          <p>{{ broll_render_error }}</p>
+        </section>
+        {% endif %}
+
+        {% if broll_rendered_video_path %}
+        <section class="status success">
+          <p class="section-title">b-roll added</p>
+          <video class="preview-video" controls preload="metadata">
+            <source src="/{{ broll_rendered_video_path }}" type="video/mp4" />
+          </video>
+        </section>
+        {% endif %}
+      </section>
     </main>
 
     <script>
@@ -203,6 +244,7 @@
         const subtitleProcessingEl = document.getElementById("subtitle-processing");
         const subtitleResultEl = document.getElementById("subtitle-result");
         const subtitleResultTextEl = document.getElementById("subtitle-result-text");
+        const brollSectionEl = document.getElementById("broll-section");
         const burnButtonEl = document.getElementById("burn-button");
         const fontSizeSliderEl = document.getElementById("font_size");
         const fontSizeValueEl = document.getElementById("font_size_value");
@@ -276,11 +318,13 @@
           if (data.subtitle_status === "processing") {
             subtitleProcessingEl.style.display = "block";
             subtitleResultEl.style.display = "none";
+            brollSectionEl.style.display = "none";
             clearSubtitleVideo();
             if (burnButtonEl) burnButtonEl.disabled = true;
           } else if (data.subtitle_status === "completed") {
             subtitleProcessingEl.style.display = "none";
             subtitleResultEl.style.display = "block";
+            brollSectionEl.style.display = "block";
             if (burnButtonEl) burnButtonEl.disabled = false;
             if (subtitleResultTextEl) {
               subtitleResultTextEl.textContent = "subtitles burned";
@@ -289,6 +333,7 @@
           } else if (data.subtitle_status === "failed") {
             subtitleProcessingEl.style.display = "none";
             subtitleResultEl.style.display = "block";
+            brollSectionEl.style.display = "none";
             clearSubtitleVideo();
             if (burnButtonEl) burnButtonEl.disabled = false;
             if (subtitleResultTextEl) {
@@ -296,6 +341,7 @@
             }
           } else {
             subtitleProcessingEl.style.display = "none";
+            brollSectionEl.style.display = "none";
             if (burnButtonEl) burnButtonEl.disabled = false;
           }
         }
