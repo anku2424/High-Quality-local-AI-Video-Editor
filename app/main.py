@@ -43,6 +43,7 @@ TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
 SUBTITLE_DIR.mkdir(parents=True, exist_ok=True)
 RENDER_DIR.mkdir(parents=True, exist_ok=True)
 BROLL_DIR.mkdir(parents=True, exist_ok=True)
+STYLES_CSS_PATH = Path("app/static/styles.css")
 
 MAX_TRANSCRIBE_FILE_BYTES = 25 * 1024 * 1024
 # 16kHz mono PCM WAV is ~32KB/s. Keep chunk duration under the API limit with margin.
@@ -156,6 +157,13 @@ def get_default_job_state() -> dict[str, Any]:
         "non_highlight_color": DEFAULT_NON_HIGHLIGHT_COLOR,
         "border_color": DEFAULT_BORDER_COLOR,
     }
+
+
+def get_static_version() -> str:
+    try:
+        return str(int(STYLES_CSS_PATH.stat().st_mtime))
+    except OSError:
+        return "1"
 
 
 def clamp_font_size(raw_size: Any) -> int:
@@ -1123,7 +1131,13 @@ async def index(request: Request):
     if api_key:
         return RedirectResponse(url="/studio", status_code=303)
 
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "static_version": get_static_version(),
+        },
+    )
 
 
 @app.get("/studio", response_class=HTMLResponse)
@@ -1161,6 +1175,7 @@ async def studio(request: Request):
             "color_swatches": COLOR_SWATCHES,
             "broll_rendered_video_path": broll_rendered_video_path,
             "broll_render_error": broll_render_error,
+            "static_version": get_static_version(),
         },
     )
 
