@@ -166,6 +166,7 @@ def clear_editor_session_state(request: Request) -> None:
         "autocut_error",
         "autocut_summary",
         "autocut_threshold",
+        "transcript_edit_message",
         "transcript_generation_ready",
         "video_uploaded",
     ]
@@ -278,6 +279,40 @@ def load_word_timestamps(transcript_json_path: str) -> list[dict[str, Any]]:
             }
         )
     return normalized_words
+
+
+def build_transcript_word_rows(transcript_json_path: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    try:
+        words = load_word_timestamps(transcript_json_path)
+    except Exception:
+        logger.exception("Failed to load transcript words for editing: %s", transcript_json_path)
+        return rows
+
+    for index, item in enumerate(words):
+        start = max(0.0, to_float(item.get("start"), 0.0))
+        end = max(start, to_float(item.get("end"), start))
+        word_text = str(item.get("word") or "").strip()
+        rows.append(
+            {
+                "index": index,
+                "start": f"{start:.2f}",
+                "end": f"{end:.2f}",
+                "word": word_text,
+            }
+        )
+    return rows
+
+
+def words_to_transcript_text(words: list[dict[str, Any]]) -> str:
+    tokens: list[str] = []
+    for item in words:
+        token = str(item.get("word") or "").strip()
+        if token:
+            tokens.append(token)
+    text = " ".join(tokens)
+    text = re.sub(r"\s+([,.;!?])", r"\1", text)
+    return text.strip()
 
 
 def list_broll_image_names(broll_dir_path: str) -> list[str]:
@@ -1424,9 +1459,16 @@ async def studio(request: Request):
     )
     autocut_error = request.session.pop("autocut_error", "")
     autocut_summary = request.session.get("autocut_summary", "")
+    transcript_edit_message = request.session.pop("transcript_edit_message", "")
     transcript_generation_ready = bool(request.session.get("transcript_generation_ready", False))
     job_id = request.session.get("transcription_job_id")
     transcription_job = get_transcription_job(job_id)
+    transcript_json_path = request.session.get("transcription_json_path") or transcription_job.get(
+        "transcript_json_path"
+    )
+    transcript_word_rows: list[dict[str, Any]] = []
+    if transcription_job.get("status") == "completed" and transcript_json_path:
+        transcript_word_rows = build_transcript_word_rows(str(transcript_json_path))
     broll_uploaded = request.session.pop("broll_uploaded", False)
     broll_image_count = int(request.session.get("broll_image_count", 0))
     broll_rendered_video_path = request.session.get("broll_rendered_video_path", "")
@@ -1446,9 +1488,11 @@ async def studio(request: Request):
             "autocut_video_path": str(autocut_video_path) if has_autocut_video else "",
             "autocut_error": autocut_error,
             "autocut_summary": autocut_summary,
+            "transcript_edit_message": transcript_edit_message,
             "silence_threshold_options": ALLOWED_SILENCE_THRESHOLDS,
             "selected_silence_threshold": selected_silence_threshold,
             "transcript_generation_ready": transcript_generation_ready,
+            "transcript_word_rows": transcript_word_rows,
             "broll_uploaded": broll_uploaded,
             "broll_image_count": broll_image_count,
             "transcription_status": transcription_job["status"],
@@ -1531,6 +1575,7 @@ async def upload_video(
     request.session["autocut_error"] = ""
     request.session["autocut_summary"] = ""
     request.session["autocut_threshold"] = DEFAULT_SILENCE_THRESHOLD
+    request.session.pop("transcript_edit_message", None)
     request.session["transcript_generation_ready"] = False
     request.session["video_uploaded"] = True
     return RedirectResponse(url="/studio", status_code=303)
@@ -1563,6 +1608,7 @@ async def autocut_silences(
 
     safe_threshold = normalize_silence_threshold(threshold_duration)
     request.session["autocut_threshold"] = safe_threshold
+    request.session.pop("transcript_edit_message", None)
 
     output_video_path = VIDEO_DIR / f"{uuid4().hex}_autocut.mp4"
     output_audio_path = AUDIO_DIR / f"{uuid4().hex}.wav"
@@ -1652,6 +1698,7 @@ async def skip_autocut_silence(request: Request):
         return RedirectResponse(url="/studio", status_code=303)
 
     output_audio_path = AUDIO_DIR / f"{uuid4().hex}.wav"
+    request.session.pop("transcript_edit_message", None)
     try:
         extract_audio_from_video(source_video_path, output_audio_path)
 
@@ -1742,8 +1789,101 @@ async def generate_transcript(request: Request, background_tasks: BackgroundTask
         karaoke_ass_path="",
         karaoke_video_path="",
     )
+    request.session.pop("transcript_edit_message", None)
     request.session["transcript_generation_ready"] = False
     background_tasks.add_task(run_transcription_job, job_id, str(audio_path), api_key)
+    return RedirectResponse(url="/studio", status_code=303)
+
+
+@app.post("/save-transcript-edits")
+async def save_transcript_edits(request: Request):
+    api_key = request.session.get("openai_api_key")
+    if not api_key:
+        return RedirectResponse(url="/", status_code=303)
+
+    job_id = request.session.get("transcription_job_id")
+    transcript_json_path = request.session.get("transcription_json_path")
+    transcript_text_path = request.session.get("transcription_text_path")
+    if not job_id or not transcript_json_path or not transcript_text_path:
+        return RedirectResponse(url="/studio", status_code=303)
+
+    job = get_transcription_job(job_id)
+    if job.get("status") != "completed":
+        return RedirectResponse(url="/studio", status_code=303)
+
+    json_path = Path(str(transcript_json_path))
+    text_path = Path(str(transcript_text_path))
+    if not json_path.is_file():
+        request.session["transcript_edit_message"] = "Transcript file not found."
+        return RedirectResponse(url="/studio", status_code=303)
+
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        words = payload.get("words")
+        if not isinstance(words, list) or not words:
+            request.session["transcript_edit_message"] = (
+                "No word-level transcript available to edit."
+            )
+            return RedirectResponse(url="/studio", status_code=303)
+
+        form = await request.form()
+        edited_rows = 0
+        for index, item in enumerate(words):
+            if not isinstance(item, dict):
+                continue
+
+            key = f"word_{index}"
+            if key not in form:
+                continue
+
+            raw_value = str(form.get(key) or "")
+            normalized_value = " ".join(raw_value.split())
+            previous_value = str(item.get("word") or "").strip()
+            updated_value = normalized_value or previous_value
+
+            if updated_value != previous_value:
+                edited_rows += 1
+            item["word"] = updated_value
+
+        payload["words"] = words
+        updated_text = words_to_transcript_text(words)
+        payload["text"] = updated_text
+        json_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        text_path.write_text(updated_text, encoding="utf-8")
+
+        set_transcription_job(
+            str(job_id),
+            status="completed",
+            text=updated_text,
+            error="",
+            transcript_json_path=str(json_path),
+            transcript_text_path=str(text_path),
+            subtitle_status="idle",
+            subtitle_error="",
+            karaoke_ass_path="",
+            karaoke_video_path="",
+        )
+
+        request.session["karaoke_ass_path"] = ""
+        request.session["karaoke_video_path"] = ""
+        request.session["broll_rendered_video_path"] = ""
+        request.session["broll_render_error"] = ""
+        request.session.pop("broll_set_id", None)
+        request.session.pop("broll_dir_path", None)
+        request.session.pop("broll_image_count", None)
+        request.session.pop("broll_uploaded", None)
+        request.session["transcript_edit_message"] = (
+            f"Transcript updated ({edited_rows} rows changed)."
+        )
+    except Exception as exc:
+        logger.exception("Saving transcript edits failed for job_id=%s", job_id)
+        request.session["transcript_edit_message"] = (
+            f"Transcript update failed: {type(exc).__name__}: {exc}"
+        )
+
     return RedirectResponse(url="/studio", status_code=303)
 
 

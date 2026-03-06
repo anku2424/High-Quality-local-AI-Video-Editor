@@ -259,6 +259,43 @@ button:active {
   line-height: 1.45;
 }
 
+.editor-hint {
+  margin: 0 0 10px;
+  color: var(--panel-soft);
+  font-size: 13px;
+}
+
+.transcript-editor-list {
+  max-height: 380px;
+  overflow: auto;
+  border: 2px solid var(--panel-line);
+  background: #fffef8;
+  padding: 8px;
+  margin-bottom: 12px;
+}
+
+.transcript-editor-row {
+  display: grid;
+  grid-template-columns: 148px 1fr;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.transcript-editor-row:last-child {
+  margin-bottom: 0;
+}
+
+.transcript-time {
+  font-family: "IBM Plex Mono", "Menlo", "Consolas", monospace;
+  font-size: 12px;
+  color: #3e3c36;
+}
+
+.transcript-editor-row input {
+  margin-bottom: 0;
+}
+
 .result-label {
   margin: 4px 0 14px;
 }
@@ -339,6 +376,10 @@ button:active {
   }
 
   .studio-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .transcript-editor-row {
     grid-template-columns: 1fr;
   }
 }

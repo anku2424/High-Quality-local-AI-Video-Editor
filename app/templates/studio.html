@@ -129,6 +129,42 @@
       </section>
 
       <section
+        id="transcript-editor"
+        class="card"
+        {% if transcription_status != "completed" %}style="display: none"{% endif %}
+      >
+        <p class="section-title">edit transcript (word-level)</p>
+        <p class="editor-hint">Edit words only. Start/end timestamps are locked.</p>
+        {% if transcript_word_rows %}
+        <form action="/save-transcript-edits" method="post">
+          <div class="transcript-editor-list">
+            {% for row in transcript_word_rows %}
+            <div class="transcript-editor-row">
+              <span class="transcript-time">{{ row.start }} - {{ row.end }}</span>
+              <input
+                type="text"
+                name="word_{{ row.index }}"
+                value="{{ row.word }}"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+            {% endfor %}
+          </div>
+          <button type="submit">Save Transcript Edits</button>
+        </form>
+        {% else %}
+        <p>No word-level timestamps found in transcript.</p>
+        {% endif %}
+      </section>
+
+      {% if transcript_edit_message %}
+      <section class="status success">
+        <p>{{ transcript_edit_message }}</p>
+      </section>
+      {% endif %}
+
+      <section
         id="subtitle-controls"
         class="card"
         {% if transcription_status != "completed" %}style="display: none"{% endif %}
@@ -306,6 +342,7 @@
         const transcriptionErrorEl = document.getElementById("transcription-error");
         const transcriptionTextEl = document.getElementById("transcription-text");
         const transcriptionErrorTextEl = document.getElementById("transcription-error-text");
+        const transcriptEditorEl = document.getElementById("transcript-editor");
 
         const subtitleControlsEl = document.getElementById("subtitle-controls");
         const subtitleProcessingEl = document.getElementById("subtitle-processing");
@@ -363,11 +400,13 @@
             transcriptionProcessingEl.style.display = "block";
             transcriptionResultEl.style.display = "none";
             transcriptionErrorEl.style.display = "none";
+            transcriptEditorEl.style.display = "none";
             subtitleControlsEl.style.display = "none";
           } else if (data.status === "completed") {
             transcriptionProcessingEl.style.display = "none";
             transcriptionErrorEl.style.display = "none";
             transcriptionResultEl.style.display = "block";
+            transcriptEditorEl.style.display = "block";
             subtitleControlsEl.style.display = "block";
             if (transcriptionTextEl) {
               transcriptionTextEl.textContent = data.text || "";
@@ -375,6 +414,7 @@
           } else if (data.status === "failed") {
             transcriptionProcessingEl.style.display = "none";
             transcriptionResultEl.style.display = "none";
+            transcriptEditorEl.style.display = "none";
             subtitleControlsEl.style.display = "none";
             transcriptionErrorEl.style.display = "block";
             if (transcriptionErrorTextEl) {
@@ -419,6 +459,7 @@
         if (!shouldPoll) return;
 
         let pollTimer = null;
+        let lastTranscriptionStatus = "{{ transcription_status }}";
 
         async function pollStatus() {
           try {
@@ -426,6 +467,17 @@
             if (!response.ok) return;
             const data = await response.json();
             applyState(data);
+            const shouldReloadForEditor =
+              lastTranscriptionStatus === "processing" && data.status === "completed";
+            lastTranscriptionStatus = data.status || lastTranscriptionStatus;
+            if (shouldReloadForEditor) {
+              if (pollTimer) {
+                clearInterval(pollTimer);
+                pollTimer = null;
+              }
+              window.location.reload();
+              return;
+            }
 
             const stillProcessing =
               data.status === "processing" || data.subtitle_status === "processing";
