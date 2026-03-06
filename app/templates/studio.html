@@ -33,6 +33,19 @@
       </section>
       {% endif %}
 
+      {% if has_uploaded_video and (transcript_generation_ready or transcription_status == "failed") %}
+      <section class="status">
+        <form action="/generate-transcript" method="post">
+          <button
+            type="submit"
+            {% if transcription_status == "processing" %}disabled{% endif %}
+          >
+            Generate Transcript
+          </button>
+        </form>
+      </section>
+      {% endif %}
+
       <section
         id="transcription-processing"
         class="status"

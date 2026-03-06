@@ -1147,6 +1147,30 @@ async def studio(request: Request):
         return RedirectResponse(url="/", status_code=303)
 
     video_uploaded = request.session.pop("video_uploaded", False)
+    uploaded_video_path = request.session.get("uploaded_video_path")
+    has_uploaded_video = False
+    if uploaded_video_path:
+        video_path = Path(str(uploaded_video_path))
+        has_uploaded_video = video_path.is_file()
+        if not has_uploaded_video:
+            stale_job_id = request.session.pop("transcription_job_id", None)
+            request.session.pop("uploaded_video_path", None)
+            request.session.pop("uploaded_audio_path", None)
+            request.session.pop("transcription_text_path", None)
+            request.session.pop("transcription_json_path", None)
+            request.session.pop("karaoke_ass_path", None)
+            request.session.pop("karaoke_video_path", None)
+            request.session.pop("broll_set_id", None)
+            request.session.pop("broll_dir_path", None)
+            request.session.pop("broll_image_count", None)
+            request.session.pop("broll_uploaded", None)
+            request.session.pop("broll_rendered_video_path", None)
+            request.session.pop("broll_render_error", None)
+            request.session.pop("transcript_generation_ready", None)
+            if stale_job_id:
+                with jobs_lock:
+                    transcription_jobs.pop(str(stale_job_id), None)
+    transcript_generation_ready = bool(request.session.get("transcript_generation_ready", False))
     job_id = request.session.get("transcription_job_id")
     transcription_job = get_transcription_job(job_id)
     broll_uploaded = request.session.pop("broll_uploaded", False)
@@ -1159,6 +1183,8 @@ async def studio(request: Request):
             "request": request,
             "masked_key": mask_api_key(api_key),
             "video_uploaded": video_uploaded,
+            "has_uploaded_video": has_uploaded_video,
+            "transcript_generation_ready": transcript_generation_ready,
             "broll_uploaded": broll_uploaded,
             "broll_image_count": broll_image_count,
             "transcription_status": transcription_job["status"],
@@ -1191,7 +1217,6 @@ async def save_key(request: Request, api_key: str = Form(...)):
 @app.post("/upload-video")
 async def upload_video(
     request: Request,
-    background_tasks: BackgroundTasks,
     video: UploadFile = File(...),
 ):
     api_key = request.session.get("openai_api_key")
@@ -1210,7 +1235,7 @@ async def upload_video(
     job_id = uuid4().hex
     set_transcription_job(
         job_id,
-        status="processing",
+        status="idle",
         error="",
         subtitle_status="idle",
         subtitle_error="",
@@ -1222,7 +1247,6 @@ async def upload_video(
         non_highlight_color=DEFAULT_NON_HIGHLIGHT_COLOR,
         border_color=DEFAULT_BORDER_COLOR,
     )
-    background_tasks.add_task(run_transcription_job, job_id, str(target_audio), api_key)
 
     request.session["uploaded_video_path"] = str(target_file)
     request.session["uploaded_audio_path"] = str(target_audio)
@@ -1237,7 +1261,42 @@ async def upload_video(
     request.session.pop("broll_uploaded", None)
     request.session.pop("broll_rendered_video_path", None)
     request.session.pop("broll_render_error", None)
+    request.session["transcript_generation_ready"] = True
     request.session["video_uploaded"] = True
+    return RedirectResponse(url="/studio", status_code=303)
+
+
+@app.post("/generate-transcript")
+async def generate_transcript(request: Request, background_tasks: BackgroundTasks):
+    api_key = request.session.get("openai_api_key")
+    if not api_key:
+        return RedirectResponse(url="/", status_code=303)
+
+    job_id = request.session.get("transcription_job_id")
+    audio_path = request.session.get("uploaded_audio_path")
+    if not job_id or not audio_path:
+        return RedirectResponse(url="/studio", status_code=303)
+    if not bool(request.session.get("transcript_generation_ready", False)):
+        job = get_transcription_job(job_id)
+        if job.get("status") != "failed":
+            return RedirectResponse(url="/studio", status_code=303)
+
+    job = get_transcription_job(job_id)
+    if job.get("status") in {"processing", "completed"}:
+        return RedirectResponse(url="/studio", status_code=303)
+
+    set_transcription_job(
+        job_id,
+        status="processing",
+        error="",
+        text="",
+        subtitle_status="idle",
+        subtitle_error="",
+        karaoke_ass_path="",
+        karaoke_video_path="",
+    )
+    request.session["transcript_generation_ready"] = False
+    background_tasks.add_task(run_transcription_job, job_id, str(audio_path), api_key)
     return RedirectResponse(url="/studio", status_code=303)
 
 
@@ -1446,5 +1505,6 @@ async def clear_key(request: Request):
     request.session.pop("broll_uploaded", None)
     request.session.pop("broll_rendered_video_path", None)
     request.session.pop("broll_render_error", None)
+    request.session.pop("transcript_generation_ready", None)
     request.session.pop("video_uploaded", None)
     return RedirectResponse(url="/", status_code=303)
