@@ -44,11 +44,15 @@ SUBTITLE_DIR.mkdir(parents=True, exist_ok=True)
 RENDER_DIR.mkdir(parents=True, exist_ok=True)
 BROLL_DIR.mkdir(parents=True, exist_ok=True)
 STYLES_CSS_PATH = Path("app/static/styles.css")
+APP_BOOT_ID = uuid4().hex
 
 MAX_TRANSCRIBE_FILE_BYTES = 25 * 1024 * 1024
 # 16kHz mono PCM WAV is ~32KB/s. Keep chunk duration under the API limit with margin.
 CHUNK_SECONDS = 600
 TRANSCRIPTION_MODEL = "whisper-1"
+ALLOWED_SILENCE_THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+DEFAULT_SILENCE_THRESHOLD = 0.3
+SILENCE_NOISE_LEVEL_DB = "-30dB"
 MAX_KARAOKE_WORDS = 7
 MAX_KARAOKE_DURATION_SECONDS = 3.8
 MAX_KARAOKE_GAP_SECONDS = 0.65
@@ -140,6 +144,34 @@ def mask_api_key(api_key: str) -> str:
     return f"{api_key[:4]}{'*' * (len(api_key) - 8)}{api_key[-4:]}"
 
 
+def clear_editor_session_state(request: Request) -> None:
+    keys_to_clear = [
+        "original_video_path",
+        "uploaded_video_path",
+        "autocut_video_path",
+        "uploaded_audio_path",
+        "transcription_job_id",
+        "transcription_text_path",
+        "transcription_json_path",
+        "karaoke_ass_path",
+        "karaoke_video_path",
+        "broll_set_id",
+        "broll_dir_path",
+        "broll_image_count",
+        "broll_uploaded",
+        "broll_rendered_video_path",
+        "broll_render_error",
+        "autocut_completed",
+        "autocut_error",
+        "autocut_summary",
+        "autocut_threshold",
+        "transcript_generation_ready",
+        "video_uploaded",
+    ]
+    for key in keys_to_clear:
+        request.session.pop(key, None)
+
+
 def get_default_job_state() -> dict[str, Any]:
     return {
         "status": "idle",
@@ -189,6 +221,14 @@ def normalize_hex_color(raw_color: Any, default_color: str) -> str:
     if not color.startswith("#"):
         color = f"#{color}"
     return color.upper()
+
+
+def normalize_silence_threshold(raw_value: Any) -> float:
+    value = to_float(raw_value, DEFAULT_SILENCE_THRESHOLD)
+    for allowed in ALLOWED_SILENCE_THRESHOLDS:
+        if abs(value - allowed) < 0.001:
+            return allowed
+    return DEFAULT_SILENCE_THRESHOLD
 
 
 def hex_to_ass_bgr(hex_color: str, alpha_hex: str = "00") -> str:
@@ -484,6 +524,196 @@ def run_ffmpeg_checked(command: list[str], error_label: str) -> None:
                 stderr_text[-4000:],
             )
         raise RuntimeError(f"{error_label} failed with exit code {result.returncode}.")
+
+
+def detect_silence_intervals(video_path: Path, threshold_duration: float) -> list[tuple[float, float]]:
+    duration_seconds = max(0.0, get_video_duration_seconds(video_path))
+    command = [
+        "ffmpeg",
+        "-i",
+        str(video_path),
+        "-af",
+        f"silencedetect=noise={SILENCE_NOISE_LEVEL_DB}:d={threshold_duration:.1f}",
+        "-f",
+        "null",
+        "-",
+    ]
+    result = subprocess.run(
+        command,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        stderr_text = (result.stderr or "").strip()
+        if stderr_text:
+            logger.error(
+                "ffmpeg silencedetect failed (noise=%s, code=%s):\n%s",
+                SILENCE_NOISE_LEVEL_DB,
+                result.returncode,
+                stderr_text[-4000:],
+            )
+        raise RuntimeError(
+            f"ffmpeg silencedetect failed with exit code {result.returncode}."
+        )
+
+    silence_ranges: list[tuple[float, float]] = []
+    current_start: Optional[float] = None
+    for line in (result.stderr or "").splitlines():
+        start_match = re.search(r"silence_start:\s*([0-9]+(?:\.[0-9]+)?)", line)
+        if start_match:
+            current_start = to_float(start_match.group(1), -1.0)
+            continue
+
+        end_match = re.search(r"silence_end:\s*([0-9]+(?:\.[0-9]+)?)", line)
+        if end_match:
+            end_value = to_float(end_match.group(1), -1.0)
+            if current_start is None:
+                continue
+            start_value = max(0.0, current_start)
+            end_value = max(0.0, end_value)
+            if end_value > start_value:
+                silence_ranges.append((start_value, end_value))
+            current_start = None
+
+    if current_start is not None and duration_seconds > current_start:
+        silence_ranges.append((max(0.0, current_start), duration_seconds))
+
+    silence_ranges.sort(key=lambda item: item[0])
+    merged_ranges: list[tuple[float, float]] = []
+    for start_value, end_value in silence_ranges:
+        if not merged_ranges:
+            merged_ranges.append((start_value, end_value))
+            continue
+        prev_start, prev_end = merged_ranges[-1]
+        if start_value <= prev_end + 0.01:
+            merged_ranges[-1] = (prev_start, max(prev_end, end_value))
+        else:
+            merged_ranges.append((start_value, end_value))
+
+    if merged_ranges:
+        logger.info(
+            "Silence detection found %s ranges at threshold=%ss using noise=%s",
+            len(merged_ranges),
+            f"{threshold_duration:.1f}",
+            SILENCE_NOISE_LEVEL_DB,
+        )
+    else:
+        logger.info(
+            "Silence detection found no ranges at threshold=%ss using noise=%s",
+            f"{threshold_duration:.1f}",
+            SILENCE_NOISE_LEVEL_DB,
+        )
+
+    return merged_ranges
+
+
+def build_keep_segments(
+    duration_seconds: float,
+    silence_ranges: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    if duration_seconds <= 0.0:
+        return []
+
+    segments: list[tuple[float, float]] = []
+    cursor = 0.0
+    for silence_start, silence_end in silence_ranges:
+        start = max(0.0, min(duration_seconds, silence_start))
+        end = max(0.0, min(duration_seconds, silence_end))
+        if start > cursor + 0.01:
+            segments.append((cursor, start))
+        cursor = max(cursor, end)
+    if cursor < duration_seconds - 0.01:
+        segments.append((cursor, duration_seconds))
+
+    cleaned = [(start, end) for start, end in segments if end - start >= 0.03]
+    if not cleaned:
+        return [(0.0, duration_seconds)]
+    return cleaned
+
+
+def auto_cut_silences_in_video(
+    video_path: Path,
+    output_path: Path,
+    threshold_duration: float,
+) -> float:
+    duration_seconds = max(0.0, get_video_duration_seconds(video_path))
+    if duration_seconds <= 0.0:
+        raise RuntimeError("Could not read uploaded video duration.")
+
+    silence_ranges = detect_silence_intervals(video_path, threshold_duration)
+    if not silence_ranges:
+        raise RuntimeError(
+            "No silences detected. Try a smaller duration threshold like 0.1s or 0.2s."
+        )
+    keep_segments = build_keep_segments(duration_seconds, silence_ranges)
+    if not keep_segments:
+        raise RuntimeError("No valid keep segments after silence detection.")
+    kept_duration = sum(max(0.0, end - start) for start, end in keep_segments)
+    removed_duration = max(0.0, duration_seconds - kept_duration)
+    if removed_duration < 0.05:
+        raise RuntimeError(
+            "No significant silence was removed. Try a smaller duration threshold like 0.1s."
+        )
+    logger.info(
+        "Auto-cut silences will remove %.2fs from a %.2fs video.",
+        removed_duration,
+        duration_seconds,
+    )
+
+    filter_parts: list[str] = []
+    concat_streams: list[str] = []
+    for idx, (segment_start, segment_end) in enumerate(keep_segments):
+        filter_parts.append(
+            f"[0:v]trim=start={segment_start:.3f}:end={segment_end:.3f},setpts=PTS-STARTPTS[v{idx}]"
+        )
+        filter_parts.append(
+            f"[0:a]atrim=start={segment_start:.3f}:end={segment_end:.3f},asetpts=PTS-STARTPTS[a{idx}]"
+        )
+        concat_streams.append(f"[v{idx}][a{idx}]")
+
+    filter_parts.append(
+        f"{''.join(concat_streams)}concat=n={len(keep_segments)}:v=1:a=1[vout][aout]"
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video_path),
+        "-filter_complex",
+        ";".join(filter_parts),
+        "-map",
+        "[vout]",
+        "-map",
+        "[aout]",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "18",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        str(output_path),
+    ]
+    run_ffmpeg_checked(command, "ffmpeg auto-cut silences")
+    output_duration_seconds = max(0.0, get_video_duration_seconds(output_path))
+    actual_removed_duration = max(0.0, duration_seconds - output_duration_seconds)
+    logger.info(
+        "Auto-cut silences rendered output %.2fs from %.2fs input (removed %.2fs).",
+        output_duration_seconds,
+        duration_seconds,
+        actual_removed_duration,
+    )
+    if actual_removed_duration < 0.05:
+        raise RuntimeError(
+            "No meaningful cut was applied. Try a smaller threshold like 0.1s or adjust noise floor."
+        )
+    return actual_removed_duration
 
 
 def render_broll_video(
@@ -1146,30 +1376,52 @@ async def studio(request: Request):
     if not api_key:
         return RedirectResponse(url="/", status_code=303)
 
+    if request.session.get("app_boot_id") != APP_BOOT_ID:
+        stale_job_id = request.session.get("transcription_job_id")
+        if stale_job_id:
+            with jobs_lock:
+                transcription_jobs.pop(str(stale_job_id), None)
+        clear_editor_session_state(request)
+        request.session["app_boot_id"] = APP_BOOT_ID
+
     video_uploaded = request.session.pop("video_uploaded", False)
+    original_video_path = request.session.get("original_video_path")
+    has_original_video = False
+    if original_video_path:
+        original_path = Path(str(original_video_path))
+        has_original_video = original_path.is_file()
+    if not has_original_video:
+        stale_job_id = request.session.pop("transcription_job_id", None)
+        clear_editor_session_state(request)
+        if stale_job_id:
+            with jobs_lock:
+                transcription_jobs.pop(str(stale_job_id), None)
+
     uploaded_video_path = request.session.get("uploaded_video_path")
-    has_uploaded_video = False
-    if uploaded_video_path:
-        video_path = Path(str(uploaded_video_path))
-        has_uploaded_video = video_path.is_file()
-        if not has_uploaded_video:
-            stale_job_id = request.session.pop("transcription_job_id", None)
-            request.session.pop("uploaded_video_path", None)
-            request.session.pop("uploaded_audio_path", None)
-            request.session.pop("transcription_text_path", None)
-            request.session.pop("transcription_json_path", None)
-            request.session.pop("karaoke_ass_path", None)
-            request.session.pop("karaoke_video_path", None)
-            request.session.pop("broll_set_id", None)
-            request.session.pop("broll_dir_path", None)
-            request.session.pop("broll_image_count", None)
-            request.session.pop("broll_uploaded", None)
-            request.session.pop("broll_rendered_video_path", None)
-            request.session.pop("broll_render_error", None)
-            request.session.pop("transcript_generation_ready", None)
-            if stale_job_id:
-                with jobs_lock:
-                    transcription_jobs.pop(str(stale_job_id), None)
+    if has_original_video and not uploaded_video_path:
+        uploaded_video_path = str(original_video_path)
+        request.session["uploaded_video_path"] = str(original_video_path)
+
+    autocut_completed = bool(request.session.get("autocut_completed", False))
+    autocut_video_path = request.session.get("autocut_video_path")
+    has_autocut_video = False
+    if autocut_completed and autocut_video_path:
+        has_autocut_video = Path(str(autocut_video_path)).is_file()
+    if autocut_completed and not has_autocut_video:
+        request.session["autocut_completed"] = False
+        request.session["transcript_generation_ready"] = False
+        request.session["uploaded_audio_path"] = ""
+        request.session.pop("autocut_video_path", None)
+        if has_original_video:
+            request.session["uploaded_video_path"] = str(original_video_path)
+        autocut_completed = False
+        autocut_video_path = ""
+
+    selected_silence_threshold = normalize_silence_threshold(
+        request.session.get("autocut_threshold", DEFAULT_SILENCE_THRESHOLD)
+    )
+    autocut_error = request.session.pop("autocut_error", "")
+    autocut_summary = request.session.get("autocut_summary", "")
     transcript_generation_ready = bool(request.session.get("transcript_generation_ready", False))
     job_id = request.session.get("transcription_job_id")
     transcription_job = get_transcription_job(job_id)
@@ -1183,8 +1435,16 @@ async def studio(request: Request):
             "request": request,
             "masked_key": mask_api_key(api_key),
             "video_uploaded": video_uploaded,
-            "has_uploaded_video": has_uploaded_video,
-            "uploaded_video_path": str(uploaded_video_path) if has_uploaded_video else "",
+            "has_uploaded_video": has_original_video,
+            "original_video_path": str(original_video_path) if has_original_video else "",
+            "uploaded_video_path": str(uploaded_video_path) if has_original_video else "",
+            "autocut_completed": autocut_completed,
+            "has_autocut_video": has_autocut_video,
+            "autocut_video_path": str(autocut_video_path) if has_autocut_video else "",
+            "autocut_error": autocut_error,
+            "autocut_summary": autocut_summary,
+            "silence_threshold_options": ALLOWED_SILENCE_THRESHOLDS,
+            "selected_silence_threshold": selected_silence_threshold,
             "transcript_generation_ready": transcript_generation_ready,
             "broll_uploaded": broll_uploaded,
             "broll_image_count": broll_image_count,
@@ -1212,6 +1472,7 @@ async def save_key(request: Request, api_key: str = Form(...)):
     # Remove accidental spaces/newlines from pasted keys.
     normalized_key = "".join(api_key.split())
     request.session["openai_api_key"] = normalized_key
+    request.session["app_boot_id"] = APP_BOOT_ID
     return RedirectResponse(url="/studio", status_code=303)
 
 
@@ -1227,12 +1488,10 @@ async def upload_video(
     suffix = Path(video.filename or "").suffix
     file_id = uuid4().hex
     target_file = VIDEO_DIR / f"{file_id}{suffix}"
-    target_audio = AUDIO_DIR / f"{file_id}.wav"
 
     with target_file.open("wb") as buffer:
         shutil.copyfileobj(video.file, buffer)
     await video.close()
-    extract_audio_from_video(target_file, target_audio)
     job_id = uuid4().hex
     set_transcription_job(
         job_id,
@@ -1250,7 +1509,9 @@ async def upload_video(
     )
 
     request.session["uploaded_video_path"] = str(target_file)
-    request.session["uploaded_audio_path"] = str(target_audio)
+    request.session["original_video_path"] = str(target_file)
+    request.session.pop("autocut_video_path", None)
+    request.session["uploaded_audio_path"] = ""
     request.session["transcription_job_id"] = job_id
     request.session["transcription_text_path"] = str(TRANSCRIPT_DIR / f"{job_id}.txt")
     request.session["transcription_json_path"] = str(TRANSCRIPT_DIR / f"{job_id}.json")
@@ -1262,8 +1523,102 @@ async def upload_video(
     request.session.pop("broll_uploaded", None)
     request.session.pop("broll_rendered_video_path", None)
     request.session.pop("broll_render_error", None)
-    request.session["transcript_generation_ready"] = True
+    request.session["autocut_completed"] = False
+    request.session["autocut_error"] = ""
+    request.session["autocut_summary"] = ""
+    request.session["autocut_threshold"] = DEFAULT_SILENCE_THRESHOLD
+    request.session["transcript_generation_ready"] = False
     request.session["video_uploaded"] = True
+    return RedirectResponse(url="/studio", status_code=303)
+
+
+@app.post("/autocut-silences")
+async def autocut_silences(
+    request: Request,
+    threshold_duration: str = Form(str(DEFAULT_SILENCE_THRESHOLD)),
+):
+    api_key = request.session.get("openai_api_key")
+    if not api_key:
+        return RedirectResponse(url="/", status_code=303)
+
+    raw_video_path = request.session.get("original_video_path")
+    job_id = request.session.get("transcription_job_id")
+    if not raw_video_path or not job_id:
+        return RedirectResponse(url="/studio", status_code=303)
+
+    source_video_path = Path(str(raw_video_path))
+    if not source_video_path.is_file():
+        request.session["autocut_completed"] = False
+        request.session["autocut_error"] = "Uploaded video not found."
+        request.session["autocut_summary"] = ""
+        request.session["transcript_generation_ready"] = False
+        request.session["uploaded_audio_path"] = ""
+        request.session.pop("autocut_video_path", None)
+        return RedirectResponse(url="/studio", status_code=303)
+
+    safe_threshold = normalize_silence_threshold(threshold_duration)
+    request.session["autocut_threshold"] = safe_threshold
+
+    output_video_path = VIDEO_DIR / f"{uuid4().hex}_autocut.mp4"
+    output_audio_path = AUDIO_DIR / f"{uuid4().hex}.wav"
+
+    try:
+        removed_seconds = auto_cut_silences_in_video(
+            video_path=source_video_path,
+            output_path=output_video_path,
+            threshold_duration=safe_threshold,
+        )
+        extract_audio_from_video(output_video_path, output_audio_path)
+
+        request.session["uploaded_video_path"] = str(output_video_path)
+        request.session["autocut_video_path"] = str(output_video_path)
+        request.session["uploaded_audio_path"] = str(output_audio_path)
+        request.session["autocut_completed"] = True
+        request.session["autocut_error"] = ""
+        request.session["autocut_summary"] = f"silences auto-cut ({removed_seconds:.2f}s removed)"
+        request.session["transcript_generation_ready"] = True
+        request.session["broll_rendered_video_path"] = ""
+        request.session["broll_render_error"] = ""
+        request.session.pop("broll_set_id", None)
+        request.session.pop("broll_dir_path", None)
+        request.session.pop("broll_image_count", None)
+        request.session.pop("broll_uploaded", None)
+
+        transcript_text_path = TRANSCRIPT_DIR / f"{job_id}.txt"
+        transcript_json_path = TRANSCRIPT_DIR / f"{job_id}.json"
+        try:
+            transcript_text_path.unlink(missing_ok=True)
+            transcript_json_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Failed to clean old transcript files for job_id=%s", job_id)
+
+        set_transcription_job(
+            str(job_id),
+            status="idle",
+            text="",
+            error="",
+            transcript_json_path="",
+            transcript_text_path="",
+            subtitle_status="idle",
+            subtitle_error="",
+            karaoke_ass_path="",
+            karaoke_video_path="",
+        )
+    except Exception as exc:
+        logger.exception("Auto-cut silences failed for video_path=%s", source_video_path)
+        request.session["autocut_completed"] = False
+        request.session["autocut_error"] = f"Auto-cut failed: {type(exc).__name__}: {exc}"
+        request.session["autocut_summary"] = ""
+        request.session["transcript_generation_ready"] = False
+        request.session["uploaded_audio_path"] = ""
+        request.session.pop("autocut_video_path", None)
+        request.session["uploaded_video_path"] = str(source_video_path)
+        try:
+            output_video_path.unlink(missing_ok=True)
+            output_audio_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     return RedirectResponse(url="/studio", status_code=303)
 
 
@@ -1276,6 +1631,8 @@ async def generate_transcript(request: Request, background_tasks: BackgroundTask
     job_id = request.session.get("transcription_job_id")
     audio_path = request.session.get("uploaded_audio_path")
     if not job_id or not audio_path:
+        return RedirectResponse(url="/studio", status_code=303)
+    if not bool(request.session.get("autocut_completed", False)):
         return RedirectResponse(url="/studio", status_code=303)
     if not bool(request.session.get("transcript_generation_ready", False)):
         job = get_transcription_job(job_id)
@@ -1493,19 +1850,6 @@ async def clear_key(request: Request):
         with jobs_lock:
             transcription_jobs.pop(job_id, None)
     request.session.pop("openai_api_key", None)
-    request.session.pop("uploaded_video_path", None)
-    request.session.pop("uploaded_audio_path", None)
-    request.session.pop("transcription_job_id", None)
-    request.session.pop("transcription_text_path", None)
-    request.session.pop("transcription_json_path", None)
-    request.session.pop("karaoke_ass_path", None)
-    request.session.pop("karaoke_video_path", None)
-    request.session.pop("broll_set_id", None)
-    request.session.pop("broll_dir_path", None)
-    request.session.pop("broll_image_count", None)
-    request.session.pop("broll_uploaded", None)
-    request.session.pop("broll_rendered_video_path", None)
-    request.session.pop("broll_render_error", None)
-    request.session.pop("transcript_generation_ready", None)
-    request.session.pop("video_uploaded", None)
+    clear_editor_session_state(request)
+    request.session.pop("app_boot_id", None)
     return RedirectResponse(url="/", status_code=303)

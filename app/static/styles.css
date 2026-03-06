@@ -123,7 +123,23 @@ input {
   font-size: 14px;
 }
 
+select {
+  width: 100%;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 2px solid var(--panel-line);
+  border-radius: 0;
+  background: #fffef5;
+  color: var(--panel-line);
+  font-size: 14px;
+}
+
 input:focus {
+  outline: 3px solid #f0d469;
+  outline-offset: 1px;
+}
+
+select:focus {
   outline: 3px solid #f0d469;
   outline-offset: 1px;
 }

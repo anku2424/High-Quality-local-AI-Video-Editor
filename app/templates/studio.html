@@ -9,7 +9,7 @@
   <body>
     <main class="container">
       <h1>Video Editor AI</h1>
-      <p class="subtitle">Your API key is saved. Upload a video to continue.</p>
+      <p class="subtitle">Your API key is saved. Upload a video, auto-cut silences, then generate transcript.</p>
 
       <section class="studio-layout">
         <section class="status success">
@@ -33,16 +33,56 @@
       </section>
       {% endif %}
 
-      {% if video_uploaded and has_uploaded_video and uploaded_video_path %}
+      {% if has_uploaded_video and original_video_path %}
       <section class="status success">
-        <p class="section-title">uploaded video</p>
+        <p class="section-title">original video</p>
         <video class="preview-video" controls preload="metadata">
-          <source src="/{{ uploaded_video_path }}" />
+          <source src="/{{ original_video_path }}" />
         </video>
       </section>
       {% endif %}
 
-      {% if has_uploaded_video and (transcript_generation_ready or transcription_status == "failed") %}
+      {% if has_uploaded_video %}
+      <section class="status">
+        <form action="/autocut-silences" method="post">
+          <label for="threshold_duration">Silence Threshold Duration</label>
+          <select id="threshold_duration" name="threshold_duration">
+            {% for option in silence_threshold_options %}
+            <option
+              value="{{ option }}"
+              {% if option == selected_silence_threshold %}selected{% endif %}
+            >
+              {{ "%.1f"|format(option) }}s
+            </option>
+            {% endfor %}
+          </select>
+          <button type="submit">Auto-cut Silences</button>
+        </form>
+      </section>
+      {% endif %}
+
+      {% if has_autocut_video and autocut_video_path %}
+      <section class="status success">
+        <p class="section-title">auto-cut video</p>
+        <video class="preview-video" controls preload="metadata">
+          <source src="/{{ autocut_video_path }}" />
+        </video>
+      </section>
+      {% endif %}
+
+      {% if autocut_completed %}
+      <section class="status success">
+        <p>{{ autocut_summary or "silences auto-cut" }}</p>
+      </section>
+      {% endif %}
+
+      {% if autocut_error %}
+      <section class="status">
+        <p>{{ autocut_error }}</p>
+      </section>
+      {% endif %}
+
+      {% if has_autocut_video and autocut_completed and (transcript_generation_ready or transcription_status == "failed") %}
       <section class="status">
         <form action="/generate-transcript" method="post">
           <button
