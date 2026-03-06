@@ -1184,6 +1184,7 @@ async def studio(request: Request):
             "masked_key": mask_api_key(api_key),
             "video_uploaded": video_uploaded,
             "has_uploaded_video": has_uploaded_video,
+            "uploaded_video_path": str(uploaded_video_path) if has_uploaded_video else "",
             "transcript_generation_ready": transcript_generation_ready,
             "broll_uploaded": broll_uploaded,
             "broll_image_count": broll_image_count,

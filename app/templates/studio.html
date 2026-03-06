@@ -33,6 +33,15 @@
       </section>
       {% endif %}
 
+      {% if video_uploaded and has_uploaded_video and uploaded_video_path %}
+      <section class="status success">
+        <p class="section-title">uploaded video</p>
+        <video class="preview-video" controls preload="metadata">
+          <source src="/{{ uploaded_video_path }}" />
+        </video>
+      </section>
+      {% endif %}
+
       {% if has_uploaded_video and (transcript_generation_ready or transcription_status == "failed") %}
       <section class="status">
         <form action="/generate-transcript" method="post">
