@@ -162,6 +162,7 @@ def clear_editor_session_state(request: Request) -> None:
         "broll_rendered_video_path",
         "broll_render_error",
         "autocut_completed",
+        "autocut_skipped",
         "autocut_error",
         "autocut_summary",
         "autocut_threshold",
@@ -1403,6 +1404,7 @@ async def studio(request: Request):
         request.session["uploaded_video_path"] = str(original_video_path)
 
     autocut_completed = bool(request.session.get("autocut_completed", False))
+    autocut_skipped = bool(request.session.get("autocut_skipped", False))
     autocut_video_path = request.session.get("autocut_video_path")
     has_autocut_video = False
     if autocut_completed and autocut_video_path:
@@ -1439,6 +1441,7 @@ async def studio(request: Request):
             "original_video_path": str(original_video_path) if has_original_video else "",
             "uploaded_video_path": str(uploaded_video_path) if has_original_video else "",
             "autocut_completed": autocut_completed,
+            "autocut_skipped": autocut_skipped,
             "has_autocut_video": has_autocut_video,
             "autocut_video_path": str(autocut_video_path) if has_autocut_video else "",
             "autocut_error": autocut_error,
@@ -1524,6 +1527,7 @@ async def upload_video(
     request.session.pop("broll_rendered_video_path", None)
     request.session.pop("broll_render_error", None)
     request.session["autocut_completed"] = False
+    request.session["autocut_skipped"] = False
     request.session["autocut_error"] = ""
     request.session["autocut_summary"] = ""
     request.session["autocut_threshold"] = DEFAULT_SILENCE_THRESHOLD
@@ -1549,6 +1553,7 @@ async def autocut_silences(
     source_video_path = Path(str(raw_video_path))
     if not source_video_path.is_file():
         request.session["autocut_completed"] = False
+        request.session["autocut_skipped"] = False
         request.session["autocut_error"] = "Uploaded video not found."
         request.session["autocut_summary"] = ""
         request.session["transcript_generation_ready"] = False
@@ -1574,6 +1579,7 @@ async def autocut_silences(
         request.session["autocut_video_path"] = str(output_video_path)
         request.session["uploaded_audio_path"] = str(output_audio_path)
         request.session["autocut_completed"] = True
+        request.session["autocut_skipped"] = False
         request.session["autocut_error"] = ""
         request.session["autocut_summary"] = f"silences auto-cut ({removed_seconds:.2f}s removed)"
         request.session["transcript_generation_ready"] = True
@@ -1607,6 +1613,7 @@ async def autocut_silences(
     except Exception as exc:
         logger.exception("Auto-cut silences failed for video_path=%s", source_video_path)
         request.session["autocut_completed"] = False
+        request.session["autocut_skipped"] = False
         request.session["autocut_error"] = f"Auto-cut failed: {type(exc).__name__}: {exc}"
         request.session["autocut_summary"] = ""
         request.session["transcript_generation_ready"] = False
@@ -1615,6 +1622,86 @@ async def autocut_silences(
         request.session["uploaded_video_path"] = str(source_video_path)
         try:
             output_video_path.unlink(missing_ok=True)
+            output_audio_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    return RedirectResponse(url="/studio", status_code=303)
+
+
+@app.post("/skip-autocut-silence")
+async def skip_autocut_silence(request: Request):
+    api_key = request.session.get("openai_api_key")
+    if not api_key:
+        return RedirectResponse(url="/", status_code=303)
+
+    raw_video_path = request.session.get("original_video_path")
+    job_id = request.session.get("transcription_job_id")
+    if not raw_video_path or not job_id:
+        return RedirectResponse(url="/studio", status_code=303)
+
+    source_video_path = Path(str(raw_video_path))
+    if not source_video_path.is_file():
+        request.session["autocut_completed"] = False
+        request.session["autocut_skipped"] = False
+        request.session["autocut_error"] = "Uploaded video not found."
+        request.session["autocut_summary"] = ""
+        request.session["transcript_generation_ready"] = False
+        request.session["uploaded_audio_path"] = ""
+        request.session.pop("autocut_video_path", None)
+        return RedirectResponse(url="/studio", status_code=303)
+
+    output_audio_path = AUDIO_DIR / f"{uuid4().hex}.wav"
+    try:
+        extract_audio_from_video(source_video_path, output_audio_path)
+
+        request.session["uploaded_video_path"] = str(source_video_path)
+        request.session.pop("autocut_video_path", None)
+        request.session["uploaded_audio_path"] = str(output_audio_path)
+        request.session["autocut_completed"] = False
+        request.session["autocut_skipped"] = True
+        request.session["autocut_error"] = ""
+        request.session["autocut_summary"] = "auto-cut skipped"
+        request.session["transcript_generation_ready"] = True
+        request.session["broll_rendered_video_path"] = ""
+        request.session["broll_render_error"] = ""
+        request.session.pop("broll_set_id", None)
+        request.session.pop("broll_dir_path", None)
+        request.session.pop("broll_image_count", None)
+        request.session.pop("broll_uploaded", None)
+
+        transcript_text_path = TRANSCRIPT_DIR / f"{job_id}.txt"
+        transcript_json_path = TRANSCRIPT_DIR / f"{job_id}.json"
+        try:
+            transcript_text_path.unlink(missing_ok=True)
+            transcript_json_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Failed to clean old transcript files for job_id=%s", job_id)
+
+        set_transcription_job(
+            str(job_id),
+            status="idle",
+            text="",
+            error="",
+            transcript_json_path="",
+            transcript_text_path="",
+            subtitle_status="idle",
+            subtitle_error="",
+            karaoke_ass_path="",
+            karaoke_video_path="",
+        )
+    except Exception as exc:
+        logger.exception(
+            "Skipping auto-cut failed while preparing audio for video_path=%s",
+            source_video_path,
+        )
+        request.session["autocut_completed"] = False
+        request.session["autocut_skipped"] = False
+        request.session["autocut_error"] = f"Skip auto-cut failed: {type(exc).__name__}: {exc}"
+        request.session["autocut_summary"] = ""
+        request.session["transcript_generation_ready"] = False
+        request.session["uploaded_audio_path"] = ""
+        try:
             output_audio_path.unlink(missing_ok=True)
         except OSError:
             pass
@@ -1632,7 +1719,9 @@ async def generate_transcript(request: Request, background_tasks: BackgroundTask
     audio_path = request.session.get("uploaded_audio_path")
     if not job_id or not audio_path:
         return RedirectResponse(url="/studio", status_code=303)
-    if not bool(request.session.get("autocut_completed", False)):
+    if not bool(request.session.get("autocut_completed", False)) and not bool(
+        request.session.get("autocut_skipped", False)
+    ):
         return RedirectResponse(url="/studio", status_code=303)
     if not bool(request.session.get("transcript_generation_ready", False)):
         job = get_transcription_job(job_id)

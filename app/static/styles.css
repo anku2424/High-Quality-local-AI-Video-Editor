@@ -175,6 +175,17 @@ button:active {
   box-shadow: 1px 1px 0 var(--panel-line);
 }
 
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.button-row form {
+  margin: 0;
+}
+
 .secondary {
   background: #f6f4ea;
 }

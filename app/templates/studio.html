@@ -44,7 +44,7 @@
 
       {% if has_uploaded_video %}
       <section class="status">
-        <form action="/autocut-silences" method="post">
+        <form id="autocut-form" action="/autocut-silences" method="post">
           <label for="threshold_duration">Silence Threshold Duration</label>
           <select id="threshold_duration" name="threshold_duration">
             {% for option in silence_threshold_options %}
@@ -56,8 +56,13 @@
             </option>
             {% endfor %}
           </select>
-          <button type="submit">Auto-cut Silences</button>
         </form>
+        <div class="button-row">
+          <button type="submit" form="autocut-form">Auto-cut Silences</button>
+          <form action="/skip-autocut-silence" method="post">
+            <button type="submit" class="secondary">No Auto-cut Silence</button>
+          </form>
+        </div>
       </section>
       {% endif %}
 
@@ -70,9 +75,9 @@
       </section>
       {% endif %}
 
-      {% if autocut_completed %}
+      {% if autocut_completed or autocut_skipped %}
       <section class="status success">
-        <p>{{ autocut_summary or "silences auto-cut" }}</p>
+        <p>{{ autocut_summary or "auto-cut step completed" }}</p>
       </section>
       {% endif %}
 
@@ -82,7 +87,7 @@
       </section>
       {% endif %}
 
-      {% if has_autocut_video and autocut_completed and (transcript_generation_ready or transcription_status == "failed") %}
+      {% if has_uploaded_video and (autocut_completed or autocut_skipped) and (transcript_generation_ready or transcription_status == "failed") %}
       <section class="status">
         <form action="/generate-transcript" method="post">
           <button
